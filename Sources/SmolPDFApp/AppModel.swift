@@ -49,6 +49,8 @@ final class AppModel {
 
     var items: [PDFItem] = []
     var customProfiles: [CompressionProfile] = [] { didSet { saveProfiles() } }
+    /// Finished compressions, newest first. Persists across launches.
+    var history: [HistoryEntry] = [] { didSet { saveHistory() } }
     var selectedProfileID: UUID = CompressionProfile.medium.id {
         didSet { UserDefaults.standard.set(selectedProfileID.uuidString, forKey: Keys.selectedProfile) }
     }
@@ -63,12 +65,19 @@ final class AppModel {
     private enum Keys {
         static let profiles = "customProfiles"
         static let selectedProfile = "selectedProfile"
+        static let history = "history"
     }
+
+    private static let historyLimit = 200
 
     private init() {
         if let data = UserDefaults.standard.data(forKey: Keys.profiles),
            let profiles = try? JSONDecoder().decode([CompressionProfile].self, from: data) {
             customProfiles = profiles
+        }
+        if let data = UserDefaults.standard.data(forKey: Keys.history),
+           let entries = try? JSONDecoder().decode([HistoryEntry].self, from: data) {
+            history = entries
         }
         if let raw = UserDefaults.standard.string(forKey: Keys.selectedProfile),
            let id = UUID(uuidString: raw), allProfiles.contains(where: { $0.id == id }) {
@@ -112,6 +121,27 @@ final class AppModel {
     private func saveProfiles() {
         if let data = try? JSONEncoder().encode(customProfiles) {
             UserDefaults.standard.set(data, forKey: Keys.profiles)
+        }
+    }
+
+    // MARK: History
+
+    func removeHistory(_ ids: Set<HistoryEntry.ID>) {
+        history.removeAll { ids.contains($0.id) }
+    }
+
+    func clearHistory() {
+        history.removeAll()
+    }
+
+    private func record(_ result: CompressionResult, profile: CompressionProfile) {
+        history.insert(HistoryEntry(result: result, profileName: profile.name), at: 0)
+        if history.count > Self.historyLimit { history.removeLast(history.count - Self.historyLimit) }
+    }
+
+    private func saveHistory() {
+        if let data = try? JSONEncoder().encode(history) {
+            UserDefaults.standard.set(data, forKey: Keys.history)
         }
     }
 
@@ -225,7 +255,9 @@ final class AppModel {
                         }.value
                         await MainActor.run {
                             switch outcome {
-                            case .success(let result): item.status = .done(result)
+                            case .success(let result):
+                                item.status = .done(result)
+                                self.record(result, profile: profile)
                             case .failure(let error): item.status = .failed(error.localizedDescription)
                             }
                         }

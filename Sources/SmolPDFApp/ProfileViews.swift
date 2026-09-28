@@ -1,82 +1,6 @@
 import SmolPDFCore
 import SwiftUI
 
-extension CompressionProfile {
-    var symbolName: String {
-        switch id {
-        case CompressionProfile.lossless.id: "checkmark.seal"
-        case CompressionProfile.low.id: "gauge.with.dots.needle.33percent"
-        case CompressionProfile.medium.id: "gauge.with.dots.needle.50percent"
-        case CompressionProfile.high.id: "gauge.with.dots.needle.67percent"
-        case CompressionProfile.maximum.id: "gauge.with.dots.needle.100percent"
-        default: "slider.horizontal.3"
-        }
-    }
-}
-
-struct ProfileSidebar: View {
-    @Environment(AppModel.self) private var model
-
-    var body: some View {
-        let selection = Binding<UUID?>(
-            get: { model.selectedProfileID },
-            set: { if let id = $0 { model.selectedProfileID = id } }
-        )
-        List(selection: selection) {
-            Section("Profiles") {
-                ForEach(CompressionProfile.builtIns) { ProfileRow(profile: $0).tag($0.id) }
-            }
-            if !model.customProfiles.isEmpty {
-                Section("Custom") {
-                    ForEach(model.customProfiles) { profile in
-                        ProfileRow(profile: profile)
-                            .tag(profile.id)
-                            .contextMenu {
-                                Button("Delete Profile", role: .destructive) { model.deleteProfile(profile.id) }
-                            }
-                    }
-                }
-            }
-        }
-        .disabled(model.isCompressing)
-        .safeAreaInset(edge: .bottom, spacing: 0) {
-            HStack(spacing: 4) {
-                Button { model.duplicateSelectedProfile() } label: {
-                    Image(systemName: "plus").frame(width: 20, height: 20)
-                }
-                .help("New profile based on the selected one")
-                Button { model.deleteProfile(model.selectedProfileID) } label: {
-                    Image(systemName: "minus").frame(width: 20, height: 20)
-                }
-                .help("Delete the selected custom profile")
-                .disabled(model.selectedProfile.isBuiltIn)
-                Spacer()
-            }
-            .buttonStyle(.borderless)
-            .padding(8)
-        }
-    }
-}
-
-struct ProfileRow: View {
-    let profile: CompressionProfile
-
-    var body: some View {
-        Label {
-            VStack(alignment: .leading, spacing: 1) {
-                Text(profile.name)
-                Text(profile.summary)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-            }
-        } icon: {
-            Image(systemName: profile.symbolName)
-        }
-        .padding(.vertical, 2)
-    }
-}
-
 struct ProfileInspector: View {
     @Environment(AppModel.self) private var model
 
@@ -88,23 +12,47 @@ struct ProfileInspector: View {
             get: { model.selectedProfile },
             set: { model.updateProfile($0) }
         )
+        VStack(spacing: 0) {
+            CompressionGauge()
+                .padding(.top, 2)
+                // Leave room for the dial's shadow, which the opaque form would otherwise cover.
+                .padding(.bottom, 14)
+            form(profile, binding)
+        }
+    }
+
+    private func form(_ profile: CompressionProfile, _ binding: Binding<CompressionProfile>) -> some View {
         Form {
             Section {
-                if profile.isBuiltIn {
-                    LabeledContent("Profile", value: profile.name)
-                } else {
+                Picker("Profile", selection: Binding(
+                    get: { model.selectedProfileID },
+                    set: { model.selectedProfileID = $0 }
+                )) {
+                    ForEach(CompressionProfile.builtIns) { Text($0.name).tag($0.id) }
+                    if !model.customProfiles.isEmpty {
+                        Divider()
+                        ForEach(model.customProfiles) { Text($0.name).tag($0.id) }
+                    }
+                }
+                .disabled(model.isCompressing)
+                if !profile.isBuiltIn {
                     TextField("Name", text: binding.name)
                 }
             } footer: {
-                if profile.isBuiltIn {
-                    HStack {
+                HStack {
+                    if profile.isBuiltIn {
                         Text("Built-in profiles can’t be changed.")
-                        Spacer()
+                            .multilineTextAlignment(.leading)
+                            .frame(maxWidth: .infinity, alignment: .leading)
                         Button("Customize…") { model.duplicateSelectedProfile() }
+                    } else {
+                        Spacer()
+                        Button("Delete Profile", role: .destructive) { model.deleteProfile(profile.id) }
                     }
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
                 }
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .disabled(model.isCompressing)
             }
 
             Section("Images") {
@@ -112,7 +60,11 @@ struct ProfileInspector: View {
                 Group {
                     VStack(alignment: .leading) {
                         LabeledContent("Quality", value: Format.percent(profile.imageQuality))
-                        Slider(value: binding.imageQuality, in: 0.05...1, step: 0.05) {
+                        // Round in the binding instead of passing `step:`, which draws a tick mark per step on macOS.
+                        Slider(value: Binding(
+                            get: { profile.imageQuality },
+                            set: { binding.wrappedValue.imageQuality = ($0 * 20).rounded() / 20 }
+                        ), in: 0.05...1) {
                             EmptyView()
                         } minimumValueLabel: {
                             Image(systemName: "tortoise")

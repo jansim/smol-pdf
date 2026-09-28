@@ -9,8 +9,8 @@ struct ContentView: View {
     var body: some View {
         @Bindable var model = model
         NavigationSplitView {
-            ProfileSidebar()
-                .navigationSplitViewColumnWidth(min: 190, ideal: 220, max: 300)
+            FileHistorySidebar()
+                .navigationSplitViewColumnWidth(min: 220, ideal: 260, max: 360)
         } detail: {
             VStack(spacing: 0) {
                 if model.items.isEmpty {
@@ -51,7 +51,7 @@ struct ContentView: View {
         }
         .inspector(isPresented: $showInspector) {
             ProfileInspector()
-                .inspectorColumnWidth(min: 250, ideal: 270, max: 340)
+                .inspectorColumnWidth(min: 260, ideal: 280, max: 340)
                 .toolbar {
                     Spacer()
                     Button { showInspector.toggle() } label: {
