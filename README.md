@@ -24,8 +24,7 @@ before/after comparison.
 Requires macOS 14 or later and Xcode 16 or later (Swift 6 toolchain).
 
 ```sh
-./scripts/build-app.sh          # → build/smol-pdf.app
-open build/smol-pdf.app
+scripts/build-app.sh && open build/smol-pdf.app
 ```
 
 For development, `swift run SmolPDFApp` starts the app without bundling, and `swift test` runs the
