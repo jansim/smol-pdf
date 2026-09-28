@@ -1,0 +1,44 @@
+{
+  "configurations": [
+    {
+      "type": "swift",
+      "request": "launch",
+      "args": [],
+      "cwd": "${workspaceFolder:smol-pdf}",
+      "name": "Debug SmolPDFApp",
+      "target": "SmolPDFApp",
+      "configuration": "debug",
+      "preLaunchTask": "swift: Build Debug SmolPDFApp"
+    },
+    {
+      "type": "swift",
+      "request": "launch",
+      "args": [],
+      "cwd": "${workspaceFolder:smol-pdf}",
+      "name": "Release SmolPDFApp",
+      "target": "SmolPDFApp",
+      "configuration": "release",
+      "preLaunchTask": "swift: Build Release SmolPDFApp"
+    },
+    {
+      "type": "swift",
+      "request": "launch",
+      "args": [],
+      "cwd": "${workspaceFolder:smol-pdf}",
+      "name": "Debug smolpdf",
+      "target": "smolpdf",
+      "configuration": "debug",
+      "preLaunchTask": "swift: Build Debug smolpdf"
+    },
+    {
+      "type": "swift",
+      "request": "launch",
+      "args": [],
+      "cwd": "${workspaceFolder:smol-pdf}",
+      "name": "Release smolpdf",
+      "target": "smolpdf",
+      "configuration": "release",
+      "preLaunchTask": "swift: Build Release smolpdf"
+    }
+  ]
+}
