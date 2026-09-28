@@ -9,18 +9,24 @@ struct FilePairView: View {
     /// The before or after file picked with a click; Space previews it.
     @State private var selectedFile: URL?
     @State private var quickLookURL: URL?
+    /// The pair's unscaled size, to shrink it into a small window.
+    @State private var pairSize = CGSize(width: FilePair.width, height: 240)
     /// Bumped when the app becomes active, so files trashed or deleted meanwhile are shown as such.
     @State private var filesCheckedAt = Date.now
     @FocusState private var isFocused: Bool
 
     var body: some View {
-        ZStack {
+        GeometryReader { proxy in
             if let item = model.current {
                 FilePair(item: item, selectedFile: selectedFile, selectFile: selectFile, preview: preview)
+                    .onGeometryChange(for: CGSize.self) { $0.size } action: { pairSize = $0 }
+                    // Shrink the pair in a small window rather than letting it set the window's minimum size.
+                    .scaleEffect(scale(fitting: proxy.size))
+                    .frame(width: proxy.size.width, height: proxy.size.height)
             }
         }
         .padding(24)
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .frame(minWidth: 0, maxWidth: .infinity, maxHeight: .infinity)
         .contentShape(Rectangle())
         .onTapGesture { selectedFile = nil }
         .onChange(of: model.current?.id) { selectedFile = nil }
@@ -34,6 +40,11 @@ struct FilePairView: View {
             filesCheckedAt = .now
         }
         .environment(\.filesCheckedAt, filesCheckedAt)
+    }
+
+    private func scale(fitting size: CGSize) -> CGFloat {
+        let fit = min(size.width / pairSize.width, size.height / pairSize.height)
+        return max(FilePair.minScale, min(1, fit))
     }
 
     private func selectFile(_ url: URL) {
@@ -76,6 +87,13 @@ extension VerticalAlignment {
 
 /// One file: the original on the left, the result (or its progress) on the right.
 struct FilePair: View {
+    private static let middleWidth: CGFloat = 130
+    private static let spacing: CGFloat = 16
+    /// The unscaled width of the pair, before it's measured.
+    static var width: CGFloat { 2 * FileTile.width + middleWidth + 2 * spacing }
+    /// How far the pair shrinks in a narrow window.
+    static let minScale: CGFloat = 0.65
+
     @Environment(AppModel.self) private var model
     let item: PDFItem
     var selectedFile: URL?
@@ -83,7 +101,7 @@ struct FilePair: View {
     var preview: (URL) -> Void
 
     var body: some View {
-        HStack(alignment: .tileCenter, spacing: 16) {
+        HStack(alignment: .tileCenter, spacing: Self.spacing) {
             let result = item.result
             tile(
                 url: result?.originalURL ?? item.url, name: result?.inputURL.lastPathComponent ?? item.name,
@@ -91,7 +109,7 @@ struct FilePair: View {
                 locked: item.status == .locked
             )
             middle
-                .frame(width: 130)
+                .frame(width: Self.middleWidth)
                 .alignmentGuide(.tileCenter) { $0[VerticalAlignment.center] }
             if let result, !result.keptOriginal {
                 tile(

@@ -10,9 +10,9 @@ struct SmolPDFApp: App {
         Window("smol-pdf", id: "main") {
             ContentView()
                 .environment(model)
-                .frame(minWidth: 760, minHeight: 460)
+                .frame(minHeight: 330)
         }
-        .defaultSize(width: 980, height: 620)
+        .defaultSize(width: 1130, height: 640)
         .windowToolbarStyle(.unified(showsTitle: false))
         .commands {
             CommandGroup(replacing: .newItem) {

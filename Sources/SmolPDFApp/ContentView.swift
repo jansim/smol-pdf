@@ -10,7 +10,7 @@ struct ContentView: View {
         @Bindable var model = model
         NavigationSplitView {
             FileHistorySidebar()
-                .navigationSplitViewColumnWidth(min: 220, ideal: 260, max: 360)
+                .navigationSplitViewColumnWidth(min: 250, ideal: 270, max: 380)
         } detail: {
             VStack(spacing: 0) {
                 if model.current == nil {
@@ -22,6 +22,7 @@ struct ContentView: View {
             }
             // Reach under the toolbar, so its buttons float on the same background.
             .background(TranslucentBackground().ignoresSafeArea())
+            .navigationSplitViewColumnWidth(min: 400, ideal: 560)
             .dropDestination(for: URL.self) { urls, _ in
                 model.add(urls)
                 return true
@@ -51,7 +52,7 @@ struct ContentView: View {
         }
         .inspector(isPresented: $showInspector) {
             ProfileInspector()
-                .inspectorColumnWidth(min: 260, ideal: 280, max: 340)
+                .inspectorColumnWidth(min: 290, ideal: 300, max: 360)
                 .toolbar {
                     Spacer()
                     Button { showInspector.toggle() } label: {
