@@ -2,22 +2,25 @@
 
 A small native macOS app for shrinking PDF files, inspired by PDF Squeezer.
 
-Drop PDFs (or whole folders) onto the window or the Dock icon, pick a compression profile and
-press **Compress**. Each file shows its old and new size, how much was saved, and a side-by-side
-before/after comparison.
+Drop a PDF onto the window or the Dock icon, pick a compression profile and press **Compress**.
+The window shows the original next to the compressed file, with both sizes and how much was saved.
+Earlier files are one click away in the history sidebar.
 
 ## Features
 
 - **Profiles**: Lossless, Low, Medium, High, Maximum, plus your own custom profiles
   (image quality, maximum resolution, grayscale, removing metadata, annotations and bookmarks).
-- **Batch processing**: several files are compressed in parallel.
 - **Text stays text**: only images are re-encoded, so text stays sharp and searchable.
 - **Keeps the original** when compression wouldn't make the file smaller.
 - **Password-protected PDFs**: unlock them in the app; the result keeps the same password.
 - **Output**: next to the original with a suffix, into a folder, or replace the original
   (the original goes to the Trash).
+- **Before and after**: the original and the result side by side with their names and sizes.
+  Select either one and press Space to Quick Look it (even when the original is in the Trash),
+  or drag it out like any file.
+- **History**: every compressed file is listed in the sidebar; select one to show it again.
 - **Compare**: before and after side by side, with scrolling and zoom kept in sync.
-- **Command-line tool** `smolpdf` with the same engine.
+- **Command-line tool** `smolpdf` with the same engine, for batches and folders.
 
 ## Build
 

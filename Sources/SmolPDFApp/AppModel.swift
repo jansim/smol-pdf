@@ -19,12 +19,24 @@ final class PDFItem: Identifiable {
     var originalSize: Int64
     var pageCount = 0
     var thumbnail: NSImage?
+    /// First page of the compressed file, once there is one.
+    var compressedThumbnail: NSImage?
     var status: Status = .ready
     var password: String?
+    /// The profile the current result was made with.
+    var profileName: String?
 
     init(url: URL) {
         self.url = url
         self.originalSize = PDFCompressor.fileSize(url)
+    }
+
+    /// A file compressed earlier, reopened from the history.
+    init(entry: HistoryEntry) {
+        url = entry.inputURL
+        originalSize = entry.originalSize
+        status = .done(entry.result)
+        profileName = entry.profileName
     }
 
     var name: String { url.lastPathComponent }
@@ -47,7 +59,10 @@ final class PDFItem: Identifiable {
 final class AppModel {
     static let shared = AppModel()
 
-    var items: [PDFItem] = []
+    /// The file shown in the window.
+    var current: PDFItem?
+    /// The history entry of the current file, highlighted in the sidebar.
+    var selectedHistoryID: HistoryEntry.ID?
     var customProfiles: [CompressionProfile] = [] { didSet { saveProfiles() } }
     /// Finished compressions, newest first. Persists across launches.
     var history: [HistoryEntry] = [] { didSet { saveHistory() } }
@@ -128,15 +143,29 @@ final class AppModel {
 
     func removeHistory(_ ids: Set<HistoryEntry.ID>) {
         history.removeAll { ids.contains($0.id) }
+        if let id = selectedHistoryID, ids.contains(id) { selectedHistoryID = nil }
     }
 
     func clearHistory() {
         history.removeAll()
+        selectedHistoryID = nil
     }
 
-    private func record(_ result: CompressionResult, profile: CompressionProfile) {
-        history.insert(HistoryEntry(result: result, profileName: profile.name), at: 0)
+    /// Shows a file from the history in the window.
+    func showHistory(_ id: HistoryEntry.ID?) {
+        selectedHistoryID = id
+        guard let id, let entry = history.first(where: { $0.id == id }) else { return }
+        let item = PDFItem(entry: entry)
+        current = item
+        loadThumbnail(for: item, from: entry.result.originalURL)
+        if !entry.keptOriginal { loadCompressedThumbnail(for: item, from: entry.outputURL) }
+    }
+
+    private func record(_ result: CompressionResult, profile: CompressionProfile) -> HistoryEntry {
+        let entry = HistoryEntry(result: result, profileName: profile.name)
+        history.insert(entry, at: 0)
         if history.count > Self.historyLimit { history.removeLast(history.count - Self.historyLimit) }
+        return entry
     }
 
     private func saveHistory() {
@@ -147,37 +176,28 @@ final class AppModel {
 
     // MARK: Files
 
+    /// Opens the first PDF among `urls`, replacing the current file.
     func add(_ urls: [URL]) {
-        let known = Set(items.map { $0.url.standardizedFileURL })
-        let newItems = PDFFinder.pdfs(in: urls)
-            .filter { !known.contains($0.standardizedFileURL) }
-            .map(PDFItem.init)
-        guard !newItems.isEmpty else { return }
-        items.append(contentsOf: newItems)
-        for item in newItems { loadDetails(for: item) }
-        if settings.compressOnDrop { compressAll() }
+        guard !isCompressing, let url = PDFFinder.pdfs(in: urls).first else { return }
+        let item = PDFItem(url: url)
+        current = item
+        selectedHistoryID = nil
+        loadDetails(for: item)
+        if settings.compressOnDrop { compress() }
     }
 
     func openPanel() {
         let panel = NSOpenPanel()
-        panel.allowedContentTypes = [.pdf, .folder]
-        panel.allowsMultipleSelection = true
-        panel.canChooseDirectories = true
-        panel.message = "Choose PDF files or folders to compress"
-        panel.prompt = "Add"
+        panel.allowedContentTypes = [.pdf]
+        panel.message = "Choose a PDF file to compress"
+        panel.prompt = "Open"
         if panel.runModal() == .OK { add(panel.urls) }
     }
 
-    func remove(_ ids: Set<PDFItem.ID>) {
-        items.removeAll { ids.contains($0.id) && $0.status != .compressing }
-    }
-
-    func clear() {
-        items.removeAll { $0.status != .compressing }
-    }
-
-    func clearFinished() {
-        items.removeAll { $0.isFinished }
+    func close() {
+        guard !isCompressing else { return }
+        current = nil
+        selectedHistoryID = nil
     }
 
     private func loadDetails(for item: PDFItem) {
@@ -186,10 +206,11 @@ final class AppModel {
             let doc = PDFDocument(url: url)
             let locked = doc?.isLocked ?? false
             let pages = doc?.pageCount ?? 0
-            let thumb = locked ? nil : doc?.page(at: 0)?.thumbnail(of: CGSize(width: 120, height: 160), for: .cropBox)
+            let thumb = locked ? nil : doc?.page(at: 0)?.thumbnail(of: Self.thumbnailSize, for: .cropBox)
             await MainActor.run {
                 item.pageCount = pages
                 item.thumbnail = thumb
+                guard item.status == .ready else { return }
                 if doc == nil {
                     item.status = .failed(CompressionError.cannotOpen.localizedDescription)
                 } else if locked {
@@ -199,87 +220,88 @@ final class AppModel {
         }
     }
 
+    nonisolated private static let thumbnailSize = CGSize(width: 200, height: 260)
+
+    nonisolated private static func thumbnail(of url: URL, password: String?) -> NSImage? {
+        let doc = PDFDocument(url: url)
+        if let password, doc?.isLocked == true { doc?.unlock(withPassword: password) }
+        return doc?.page(at: 0)?.thumbnail(of: thumbnailSize, for: .cropBox)
+    }
+
+    private func loadThumbnail(for item: PDFItem, from url: URL) {
+        let password = item.password
+        Task.detached(priority: .userInitiated) {
+            let thumb = Self.thumbnail(of: url, password: password)
+            await MainActor.run { item.thumbnail = thumb }
+        }
+    }
+
+    private func loadCompressedThumbnail(for item: PDFItem, from url: URL) {
+        let password = item.password
+        Task.detached(priority: .userInitiated) {
+            let thumb = Self.thumbnail(of: url, password: password)
+            await MainActor.run { item.compressedThumbnail = thumb }
+        }
+    }
+
     func unlock(_ item: PDFItem, password: String) -> Bool {
         guard let doc = PDFDocument(url: item.url), doc.unlock(withPassword: password) else { return false }
         item.password = password
         item.pageCount = doc.pageCount
-        item.thumbnail = doc.page(at: 0)?.thumbnail(of: CGSize(width: 120, height: 160), for: .cropBox)
+        item.thumbnail = doc.page(at: 0)?.thumbnail(of: Self.thumbnailSize, for: .cropBox)
         item.status = .ready
         return true
     }
 
     // MARK: Compression
 
-    var pendingItems: [PDFItem] { items.filter { $0.status == .ready } }
+    var canCompress: Bool {
+        guard !isCompressing, let current else { return false }
+        return current.status == .ready || current.isFinished
+    }
 
-    var canCompress: Bool { !isCompressing && !pendingItems.isEmpty }
-
-    /// Re-queues finished items so they can be compressed again, e.g. with another profile.
-    func resetFinished() {
-        for item in items where item.isFinished {
-            item.status = .ready
+    /// Compresses the current file, again if it was compressed already, e.g. with another profile.
+    func compress() {
+        guard canCompress, let item = current else { return }
+        if item.isFinished {
+            // After replacing the original, the item's file is now the compressed one.
+            if item.result?.outputURL == item.url, let thumbnail = item.compressedThumbnail {
+                item.thumbnail = thumbnail
+            }
+            item.compressedThumbnail = nil
             item.originalSize = PDFCompressor.fileSize(item.url)
         }
-    }
-
-    func compressAll() {
-        guard !isCompressing else { return }
-        if pendingItems.isEmpty { resetFinished() }
-        let queue = pendingItems
-        guard !queue.isEmpty else { return }
-        compress(queue)
-    }
-
-    func compress(_ queue: [PDFItem]) {
         isCompressing = true
+        item.status = .compressing
         let profile = selectedProfile
         let location = settings.outputLocation
         let keepOriginal = settings.keepOriginalIfLarger
-        let jobs = queue.map { ($0, $0.url, $0.password) }
-        for (item, _, _) in jobs { item.status = .compressing }
+        let url = item.url, password = item.password
 
         Task {
-            let width = max(1, ProcessInfo.processInfo.activeProcessorCount / 2)
-            await withTaskGroup(of: Void.self) { group in
-                for (index, (item, url, password)) in jobs.enumerated() {
-                    // Limit how many files are processed at once.
-                    if index >= width { await group.next() }
-                    group.addTask {
-                        let outcome: Result<CompressionResult, Error> = await Task.detached(priority: .userInitiated) {
-                            Result {
-                                try PDFCompressor.compress(
-                                    input: url, output: location.destination(for: url), profile: profile,
-                                    password: password, keepOriginalIfLarger: keepOriginal
-                                )
-                            }
-                        }.value
-                        await MainActor.run {
-                            switch outcome {
-                            case .success(let result):
-                                item.status = .done(result)
-                                self.record(result, profile: profile)
-                            case .failure(let error): item.status = .failed(error.localizedDescription)
-                            }
-                        }
-                    }
+            let outcome: Result<CompressionResult, Error> = await Task.detached(priority: .userInitiated) {
+                Result {
+                    try PDFCompressor.compress(
+                        input: url, output: location.destination(for: url), profile: profile,
+                        password: password, keepOriginalIfLarger: keepOriginal
+                    )
                 }
+            }.value
+            switch outcome {
+            case .success(let result):
+                item.status = .done(result)
+                item.profileName = profile.name
+                let entry = record(result, profile: profile)
+                if current === item { selectedHistoryID = entry.id }
+                if !result.keptOriginal { loadCompressedThumbnail(for: item, from: result.outputURL) }
+                if settings.revealWhenDone, !result.keptOriginal {
+                    NSWorkspace.shared.activateFileViewerSelecting([result.outputURL])
+                }
+            case .failure(let error):
+                item.status = .failed(error.localizedDescription)
             }
             isCompressing = false
-            finished(jobs.map(\.0))
+            if !NSApp.isActive { NSApp.requestUserAttention(.informationalRequest) }
         }
     }
-
-    private func finished(_ batch: [PDFItem]) {
-        let outputs = batch.compactMap(\.result).filter { !$0.keptOriginal }.map(\.outputURL)
-        if settings.revealWhenDone, !outputs.isEmpty {
-            NSWorkspace.shared.activateFileViewerSelecting(outputs)
-        }
-        if !NSApp.isActive { NSApp.requestUserAttention(.informationalRequest) }
-    }
-
-    // MARK: Totals
-
-    var totalOriginal: Int64 { items.reduce(0) { $0 + $1.originalSize } }
-
-    var finishedResults: [CompressionResult] { items.compactMap(\.result) }
 }

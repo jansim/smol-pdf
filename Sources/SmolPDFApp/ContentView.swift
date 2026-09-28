@@ -13,40 +13,40 @@ struct ContentView: View {
                 .navigationSplitViewColumnWidth(min: 220, ideal: 260, max: 360)
         } detail: {
             VStack(spacing: 0) {
-                if model.items.isEmpty {
+                if model.current == nil {
                     DropZoneView(isTargeted: isDropTargeted)
                 } else {
-                    FileListView()
-                    Divider()
-                    BottomBar()
+                    FilePairView()
+                        .safeAreaInset(edge: .bottom, spacing: 0) { BottomBar() }
                 }
             }
+            // Reach under the toolbar, so its buttons float on the same background.
+            .background(TranslucentBackground().ignoresSafeArea())
             .dropDestination(for: URL.self) { urls, _ in
                 model.add(urls)
                 return true
             } isTargeted: { isDropTargeted = $0 }
             .overlay {
-                if isDropTargeted && !model.items.isEmpty {
+                if isDropTargeted && model.current != nil {
                     RoundedRectangle(cornerRadius: 10)
                         .strokeBorder(Color.accentColor, lineWidth: 3)
                         .padding(4)
                         .allowsHitTesting(false)
                 }
             }
-            .navigationTitle("smol-pdf")
-            .navigationSubtitle(model.selectedProfile.name)
+            .toolbarBackground(.hidden, for: .windowToolbar)
             .toolbar {
-                ToolbarItemGroup {
-                    Button { model.openPanel() } label: {
-                        Label("Add Files", systemImage: "plus")
-                    }
-                    .help("Add PDF files or folders")
-                    Button { model.clear() } label: {
-                        Label("Clear List", systemImage: "trash")
-                    }
-                    .help("Remove all files from the list")
-                    .disabled(model.items.isEmpty)
+                Button { model.openPanel() } label: {
+                    Label("Open File", systemImage: "plus")
                 }
+                .help("Open a PDF file")
+                // Without a title, this keeps the close button on the right.
+                Spacer()
+                Button { model.close() } label: {
+                    Label("Close File", systemImage: "xmark")
+                }
+                .help("Close the current file")
+                .disabled(model.current == nil || model.isCompressing)
             }
         }
         .inspector(isPresented: $showInspector) {
@@ -60,6 +60,7 @@ struct ContentView: View {
                     .help("Show or hide profile settings")
                 }
         }
+        .background(TitlelessWindow())
         .sheet(item: $model.unlockItem) { PasswordSheet(item: $0) }
         .sheet(item: $model.compareItem) { CompareView(item: $0) }
     }
@@ -78,12 +79,12 @@ struct DropZoneView: View {
                 .foregroundStyle(isTargeted ? Color.accentColor : .secondary)
                 .symbolEffect(.bounce, value: isTargeted)
             VStack(spacing: 6) {
-                Text("Drop PDF Files Here")
+                Text("Drop a PDF File Here")
                     .font(.title2.weight(.semibold))
-                Text("Files and folders are compressed with the “\(model.selectedProfile.name)” profile.")
+                Text("It’s compressed with the “\(model.selectedProfile.name)” profile.")
                     .foregroundStyle(.secondary)
             }
-            Button("Choose Files…") { model.openPanel() }
+            Button("Choose File…") { model.openPanel() }
                 .controlSize(.large)
             Text(model.settings.destinationSummary)
                 .font(.caption)
@@ -92,6 +93,7 @@ struct DropZoneView: View {
         .multilineTextAlignment(.center)
         .padding(40)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .contentShape(Rectangle())
         .background {
             RoundedRectangle(cornerRadius: 16)
                 .strokeBorder(style: StrokeStyle(lineWidth: 2, dash: [8, 6]))
@@ -114,7 +116,6 @@ struct BottomBar: View {
     var body: some View {
         @Bindable var model = model
         HStack(spacing: 12) {
-            summary
             Spacer()
             Picker("Profile", selection: $model.selectedProfileID) {
                 ForEach(model.allProfiles) { Text($0.name).tag($0.id) }
@@ -123,7 +124,7 @@ struct BottomBar: View {
             .fixedSize()
             .disabled(model.isCompressing)
             Button {
-                model.compressAll()
+                model.compress()
             } label: {
                 if model.isCompressing {
                     HStack(spacing: 6) {
@@ -131,39 +132,50 @@ struct BottomBar: View {
                         Text("Compressing…")
                     }
                 } else {
-                    Text(model.pendingItems.isEmpty ? "Compress Again" : "Compress")
+                    Text(model.current?.isFinished == true ? "Compress Again" : "Compress")
                         .frame(minWidth: 90)
                 }
             }
             .buttonStyle(.borderedProminent)
-            .controlSize(.large)
-            .disabled(model.isCompressing)
+            .disabled(!model.canCompress)
             .keyboardShortcut(.defaultAction)
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 10)
-        .background(.bar)
+        .background(.regularMaterial)
+        .overlay(alignment: .top) { Divider() }
     }
+}
 
-    @ViewBuilder private var summary: some View {
-        let results = model.finishedResults
-        VStack(alignment: .leading, spacing: 2) {
-            Text("\(model.items.count) \(model.items.count == 1 ? "file" : "files") · \(Format.bytes(model.totalOriginal))")
-                .font(.callout)
-            if !results.isEmpty {
-                let before = results.reduce(0) { $0 + $1.originalSize }
-                let after = results.reduce(0) { $0 + $1.compressedSize }
-                let saved = before - after
-                Text("Saved \(Format.bytes(saved)) (\(Format.percent(before > 0 ? Double(saved) / Double(before) : 0)))")
-                    .font(.caption)
-                    .foregroundStyle(.green)
-            } else {
-                Text(model.settings.destinationSummary)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
+/// Hides the window title and lets the toolbar buttons float without a bar behind them.
+struct TitlelessWindow: NSViewRepresentable {
+    func makeNSView(context: Context) -> NSView { WindowObserver() }
+
+    func updateNSView(_ nsView: NSView, context: Context) {}
+
+    private final class WindowObserver: NSView {
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            guard let window else { return }
+            window.titleVisibility = .hidden
+            window.titlebarAppearsTransparent = true
+            window.titlebarSeparatorStyle = .none
+            window.toolbar?.showsBaselineSeparator = false
         }
     }
+}
+
+/// The desktop showing through the window, like a sidebar.
+struct TranslucentBackground: NSViewRepresentable {
+    func makeNSView(context: Context) -> NSVisualEffectView {
+        let view = NSVisualEffectView()
+        view.material = .underWindowBackground
+        view.blendingMode = .behindWindow
+        view.state = .followsWindowActiveState
+        return view
+    }
+
+    func updateNSView(_ nsView: NSVisualEffectView, context: Context) {}
 }
 
 enum Format {

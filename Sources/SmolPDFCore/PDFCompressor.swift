@@ -10,6 +10,25 @@ public struct CompressionResult: Hashable, Sendable {
     public var compressedSize: Int64
     /// True when compression could not make the file smaller and the original was kept.
     public var keptOriginal: Bool
+    /// Where the file previously at `outputURL` ended up in the Trash, e.g. the original when replacing it.
+    public var trashedURL: URL? = nil
+
+    public init(
+        inputURL: URL, outputURL: URL, originalSize: Int64, compressedSize: Int64,
+        keptOriginal: Bool, trashedURL: URL? = nil
+    ) {
+        self.inputURL = inputURL
+        self.outputURL = outputURL
+        self.originalSize = originalSize
+        self.compressedSize = compressedSize
+        self.keptOriginal = keptOriginal
+        self.trashedURL = trashedURL
+    }
+
+    /// The uncompressed file: the input, or its copy in the Trash when it was replaced.
+    public var originalURL: URL {
+        outputURL == inputURL && !keptOriginal ? trashedURL ?? inputURL : inputURL
+    }
 
     public var savedBytes: Int64 { max(0, originalSize - compressedSize) }
     public var savedFraction: Double {
@@ -81,13 +100,15 @@ public enum PDFCompressor {
             )
         }
 
+        var trashedURL: NSURL?
         if fm.fileExists(atPath: output.path) {
-            try fm.trashItem(at: output, resultingItemURL: nil)
+            try fm.trashItem(at: output, resultingItemURL: &trashedURL)
         }
         try fm.moveItem(at: tempURL, to: output)
         return CompressionResult(
             inputURL: input, outputURL: output,
-            originalSize: originalSize, compressedSize: compressedSize, keptOriginal: false
+            originalSize: originalSize, compressedSize: compressedSize, keptOriginal: false,
+            trashedURL: trashedURL as URL?
         )
     }
 

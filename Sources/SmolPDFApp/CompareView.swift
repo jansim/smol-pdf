@@ -17,7 +17,7 @@ struct CompareView: View {
                 }
                 .frame(height: 44)
                 Divider()
-                SyncedPDFViews(left: result.inputURL, right: result.outputURL, password: item.password)
+                SyncedPDFViews(left: result.originalURL, right: result.outputURL, password: item.password)
             }
             Divider()
             HStack {

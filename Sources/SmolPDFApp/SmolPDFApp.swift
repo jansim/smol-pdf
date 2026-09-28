@@ -13,25 +13,25 @@ struct SmolPDFApp: App {
                 .frame(minWidth: 760, minHeight: 460)
         }
         .defaultSize(width: 980, height: 620)
+        .windowToolbarStyle(.unified(showsTitle: false))
         .commands {
             CommandGroup(replacing: .newItem) {
-                Button("Add Files…") { model.openPanel() }
+                Button("Open…") { model.openPanel() }
                     .keyboardShortcut("o")
             }
             CommandMenu("Compression") {
-                Button("Compress") { model.compressAll() }
+                Button("Compress") { model.compress() }
                     .keyboardShortcut(.return, modifiers: .command)
-                    .disabled(model.isCompressing || model.items.isEmpty)
+                    .disabled(!model.canCompress)
                 Divider()
                 Picker("Profile", selection: $model.selectedProfileID) {
                     ForEach(model.allProfiles) { Text($0.name).tag($0.id) }
                 }
                 Button("New Profile from Selected") { model.duplicateSelectedProfile() }
                 Divider()
-                Button("Remove Finished") { model.clearFinished() }
-                    .keyboardShortcut("k")
-                Button("Remove All") { model.clear() }
+                Button("Close File") { model.close() }
                     .keyboardShortcut(.delete, modifiers: [.command, .shift])
+                    .disabled(model.current == nil || model.isCompressing)
             }
         }
 

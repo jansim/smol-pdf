@@ -10,6 +10,8 @@ struct HistoryEntry: Codable, Hashable, Identifiable {
     var originalSize: Int64
     var compressedSize: Int64
     var keptOriginal: Bool
+    /// Where the original went when it was replaced.
+    var trashedURL: URL?
     var profileName: String
     var date: Date
 
@@ -19,11 +21,19 @@ struct HistoryEntry: Codable, Hashable, Identifiable {
         originalSize = result.originalSize
         compressedSize = result.compressedSize
         keptOriginal = result.keptOriginal
+        trashedURL = result.trashedURL
         self.profileName = profileName
         self.date = date
     }
 
     var name: String { outputURL.lastPathComponent }
+
+    var result: CompressionResult {
+        CompressionResult(
+            inputURL: inputURL, outputURL: outputURL, originalSize: originalSize,
+            compressedSize: compressedSize, keptOriginal: keptOriginal, trashedURL: trashedURL
+        )
+    }
 
     var savedFraction: Double {
         originalSize > 0 ? Double(max(0, originalSize - compressedSize)) / Double(originalSize) : 0
@@ -34,10 +44,10 @@ struct HistoryEntry: Codable, Hashable, Identifiable {
 
 struct FileHistorySidebar: View {
     @Environment(AppModel.self) private var model
-    @State private var selection = Set<HistoryEntry.ID>()
 
     var body: some View {
-        List(selection: $selection) {
+        // Selecting an entry shows it in the window.
+        List(selection: Binding(get: { model.selectedHistoryID }, set: { model.showHistory($0) })) {
             Section("File History") {
                 ForEach(model.history) { HistoryRow(entry: $0).tag($0.id) }
             }
@@ -64,8 +74,7 @@ struct FileHistorySidebar: View {
             entries(ids).forEach(open)
         }
         .onDeleteCommand {
-            model.removeHistory(selection)
-            selection.removeAll()
+            if let id = model.selectedHistoryID { model.removeHistory([id]) }
         }
         .safeAreaInset(edge: .bottom, spacing: 0) {
             HStack {
