@@ -46,28 +46,6 @@ struct ProfileInspector: View {
 
     private func form(_ profile: CompressionProfile, _ binding: Binding<CompressionProfile>) -> some View {
         Form {
-            Section {
-                Picker("Profile", selection: Binding(
-                    get: { model.selectedProfileID },
-                    set: { model.selectedProfileID = $0 }
-                )) {
-                    ForEach(CompressionProfile.builtIns) { Text(model.displayName(of: $0)).tag($0.id) }
-                }
-                .disabled(model.isCompressing)
-            } footer: {
-                if model.isCustomized(profile.id) {
-                    HStack {
-                        Label("Customized", systemImage: "slider.horizontal.3")
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                        Button("Reset") { model.resetProfile(profile.id) }
-                            .help("Restore the “\(profile.name)” profile’s original settings")
-                    }
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .disabled(model.isCompressing)
-                }
-            }
-
             Section("Images") {
                 Toggle("Compress images", isOn: binding.compressImages)
                 Group {

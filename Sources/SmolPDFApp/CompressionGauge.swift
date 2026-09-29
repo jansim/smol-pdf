@@ -146,11 +146,25 @@ struct CompressionGauge: View {
                 .lineLimit(1)
                 .minimumScaleFactor(0.6)
                 .contentTransition(.interpolate)
-            Text(customized ? "Customized" : dialSummary(profile))
-                .font(.caption2)
-                .foregroundStyle(.secondary)
-                .lineLimit(1)
-                .minimumScaleFactor(0.8)
+            Group {
+                if customized {
+                    Button {
+                        model.resetProfile(profile.id)
+                    } label: {
+                        Label("Customized", systemImage: "arrow.counterclockwise")
+                            .labelStyle(TrailingIconLabelStyle())
+                    }
+                    .buttonStyle(.plain)
+                    .help("Reset “\(profile.name)” to its original settings")
+                    .accessibilityLabel("Reset customized profile")
+                } else {
+                    Text(dialSummary(profile))
+                }
+            }
+            .font(.caption2)
+            .foregroundStyle(.secondary)
+            .lineLimit(1)
+            .minimumScaleFactor(0.8)
         }
         .frame(width: radius * 1.25)
     }
