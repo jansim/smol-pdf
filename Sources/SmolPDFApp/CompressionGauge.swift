@@ -14,6 +14,7 @@ extension CompressionProfile {
 /// The needle locks in to the built-in levels; custom profiles are shown at their approximate level.
 struct CompressionGauge: View {
     @Environment(AppModel.self) private var model
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @FocusState private var isFocused: Bool
     /// Set for the duration of a drag that started on the center label, so it doesn't move the dial.
     @State private var ignoringDrag: Bool?
@@ -30,19 +31,26 @@ struct CompressionGauge: View {
     var body: some View {
         let profile = model.selectedProfile
         let level = profile.compressionLevel
+        let onFire = profile.isBuiltIn && level > 0.999
         VStack(spacing: 0) {
             ZStack {
                 face
                 track
-                progress(level, custom: !profile.isBuiltIn)
+                if onFire {
+                    fieryProgress
+                        .transition(.opacity)
+                } else {
+                    progress(level, custom: !profile.isBuiltIn)
+                }
                 ticks(level)
                 knob(level)
-                label(profile)
+                label(profile, onFire: onFire)
             }
             .frame(width: diameter, height: diameter)
             .contentShape(Circle())
             .gesture(drag)
             .animation(.spring(response: 0.3, dampingFraction: 0.62), value: level)
+            .animation(.easeInOut(duration: 0.35), value: onFire)
             endLabels
                 .padding(.top, -12)
         }
@@ -95,6 +103,25 @@ struct CompressionGauge: View {
             ))
     }
 
+    /// The full arc at maximum: hot colors that swirl around the dial and a pulsing glow.
+    private var fieryProgress: some View {
+        TimelineView(.animation(paused: reduceMotion)) { timeline in
+            let t = timeline.date.timeIntervalSinceReferenceDate
+            let phase = (t * 120).truncatingRemainder(dividingBy: 360)
+            placeArc(arc(to: 1)
+                .stroke(
+                    AngularGradient(
+                        colors: [.yellow, .orange, .red, .pink, .red, .orange, .yellow],
+                        center: .center,
+                        startAngle: .degrees(phase),
+                        endAngle: .degrees(phase + 360)
+                    ),
+                    style: StrokeStyle(lineWidth: trackWidth, lineCap: .round)
+                ))
+                .shadow(color: .red.opacity(0.45 + 0.2 * sin(t * 4)), radius: 6)
+        }
+    }
+
     private func ticks(_ level: Double) -> some View {
         ForEach(detents) { detent in
             let reached = detent.compressionLevel <= level + 0.001
@@ -116,10 +143,13 @@ struct CompressionGauge: View {
             .rotationEffect(angle(for: level))
     }
 
-    private func label(_ profile: CompressionProfile) -> some View {
+    private func label(_ profile: CompressionProfile, onFire: Bool) -> some View {
         VStack(spacing: 2) {
             Text(profile.name)
                 .font(.system(size: 22, weight: .semibold, design: .rounded))
+                .foregroundStyle(onFire
+                    ? AnyShapeStyle(LinearGradient(colors: [.orange, .red], startPoint: .top, endPoint: .bottom))
+                    : AnyShapeStyle(.primary))
                 .lineLimit(1)
                 .minimumScaleFactor(0.6)
                 .contentTransition(.interpolate)

@@ -6,19 +6,42 @@ struct ProfileInspector: View {
 
     private static let resolutions = [72, 96, 110, 150, 200, 300, 600]
 
+    @State private var gaugeHeight = 0.0
+    /// How far the form is scrolled past its top, which the dial follows.
+    @State private var scrolled = 0.0
+
     var body: some View {
         let profile = model.selectedProfile
         let binding = Binding<CompressionProfile>(
             get: { model.selectedProfile },
             set: { model.updateProfile($0) }
         )
-        VStack(spacing: 0) {
-            CompressionGauge()
-                .padding(.top, 2)
-                // Leave room for the dial's shadow, which the opaque form would otherwise cover.
-                .padding(.bottom, 14)
+        if #available(macOS 15, *) {
+            // The dial can't live inside the form (macOS drops custom section headers), so it floats on top
+            // of a margin reserved for it and moves along when the form scrolls.
             form(profile, binding)
+                .contentMargins(.top, gaugeHeight, for: .scrollContent)
+                .onScrollGeometryChange(for: Double.self) { $0.contentOffset.y + $0.contentInsets.top } action: { _, offset in
+                    scrolled = offset
+                }
+                .overlay(alignment: .top) {
+                    gauge
+                        .onGeometryChange(for: Double.self) { $0.size.height } action: { gaugeHeight = $0 }
+                        .offset(y: -scrolled)
+                }
+        } else {
+            VStack(spacing: 0) {
+                gauge
+                form(profile, binding)
+            }
         }
+    }
+
+    private var gauge: some View {
+        CompressionGauge()
+            .padding(.top, 2)
+            // Leave room for the dial's shadow, which the opaque form would otherwise cover.
+            .padding(.bottom, 14)
     }
 
     private func form(_ profile: CompressionProfile, _ binding: Binding<CompressionProfile>) -> some View {
