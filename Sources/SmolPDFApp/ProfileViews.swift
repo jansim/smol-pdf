@@ -51,31 +51,21 @@ struct ProfileInspector: View {
                     get: { model.selectedProfileID },
                     set: { model.selectedProfileID = $0 }
                 )) {
-                    ForEach(CompressionProfile.builtIns) { Text($0.name).tag($0.id) }
-                    if !model.customProfiles.isEmpty {
-                        Divider()
-                        ForEach(model.customProfiles) { Text($0.name).tag($0.id) }
-                    }
+                    ForEach(CompressionProfile.builtIns) { Text(model.displayName(of: $0)).tag($0.id) }
                 }
                 .disabled(model.isCompressing)
-                if !profile.isBuiltIn {
-                    TextField("Name", text: binding.name)
-                }
             } footer: {
-                HStack {
-                    if profile.isBuiltIn {
-                        Text("Built-in profiles can’t be changed.")
-                            .multilineTextAlignment(.leading)
+                if model.isCustomized(profile.id) {
+                    HStack {
+                        Label("Customized", systemImage: "slider.horizontal.3")
                             .frame(maxWidth: .infinity, alignment: .leading)
-                        Button("Customize…") { model.duplicateSelectedProfile() }
-                    } else {
-                        Spacer()
-                        Button("Delete Profile", role: .destructive) { model.deleteProfile(profile.id) }
+                        Button("Reset") { model.resetProfile(profile.id) }
+                            .help("Restore the “\(profile.name)” profile’s original settings")
                     }
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .disabled(model.isCompressing)
                 }
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .disabled(model.isCompressing)
             }
 
             Section("Images") {
@@ -111,7 +101,7 @@ struct ProfileInspector: View {
                 }
                 .disabled(!profile.compressImages)
             }
-            .disabled(profile.isBuiltIn || model.isCompressing)
+            .disabled(model.isCompressing)
 
             Section("Document") {
                 Toggle("Convert to grayscale", isOn: binding.grayscale)
@@ -119,7 +109,7 @@ struct ProfileInspector: View {
                 Toggle("Remove annotations & form fields", isOn: binding.removeAnnotations)
                 Toggle("Remove bookmarks", isOn: binding.removeBookmarks)
             }
-            .disabled(profile.isBuiltIn || model.isCompressing)
+            .disabled(model.isCompressing)
         }
         .formStyle(.grouped)
     }

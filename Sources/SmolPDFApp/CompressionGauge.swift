@@ -2,16 +2,8 @@ import AppKit
 import SmolPDFCore
 import SwiftUI
 
-extension CompressionProfile {
-    /// How aggressive the profile is, from 0 (lossless) to 1 (maximum).
-    /// The built-in profiles sit at 0, 0.25, 0.5, 0.75 and 1.
-    var compressionLevel: Double {
-        compressImages ? min(1, max(0, (1 - imageQuality) * 1.25)) : 0
-    }
-}
-
 /// A speedometer-style dial that selects one of the built-in profiles.
-/// The needle locks in to the built-in levels; custom profiles are shown at their approximate level.
+/// The profiles sit at fixed, evenly spaced positions, whether or not they're customized.
 struct CompressionGauge: View {
     @Environment(AppModel.self) private var model
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -30,8 +22,9 @@ struct CompressionGauge: View {
 
     var body: some View {
         let profile = model.selectedProfile
-        let level = profile.compressionLevel
-        let onFire = profile.isBuiltIn && level > 0.999
+        let level = position(of: profile)
+        let customized = model.isCustomized(profile.id)
+        let onFire = !customized && level > 0.999
         VStack(spacing: 0) {
             ZStack {
                 face
@@ -40,11 +33,11 @@ struct CompressionGauge: View {
                     fieryProgress
                         .transition(.opacity)
                 } else {
-                    progress(level, custom: !profile.isBuiltIn)
+                    progress(level, custom: customized)
                 }
                 ticks(level)
                 knob(level)
-                label(profile, onFire: onFire)
+                label(profile, customized: customized, onFire: onFire)
             }
             .frame(width: diameter, height: diameter)
             .contentShape(Circle())
@@ -124,12 +117,12 @@ struct CompressionGauge: View {
 
     private func ticks(_ level: Double) -> some View {
         ForEach(detents) { detent in
-            let reached = detent.compressionLevel <= level + 0.001
+            let reached = position(of: detent) <= level + 0.001
             Capsule()
                 .fill(reached ? AnyShapeStyle(.secondary) : AnyShapeStyle(.quaternary))
                 .frame(width: 6, height: 2)
                 .offset(x: radius - trackWidth / 2 - 7)
-                .rotationEffect(angle(for: detent.compressionLevel))
+                .rotationEffect(angle(for: position(of: detent)))
         }
     }
 
@@ -143,7 +136,7 @@ struct CompressionGauge: View {
             .rotationEffect(angle(for: level))
     }
 
-    private func label(_ profile: CompressionProfile, onFire: Bool) -> some View {
+    private func label(_ profile: CompressionProfile, customized: Bool, onFire: Bool) -> some View {
         VStack(spacing: 2) {
             Text(profile.name)
                 .font(.system(size: 22, weight: .semibold, design: .rounded))
@@ -153,7 +146,7 @@ struct CompressionGauge: View {
                 .lineLimit(1)
                 .minimumScaleFactor(0.6)
                 .contentTransition(.interpolate)
-            Text(profile.isBuiltIn ? dialSummary(profile) : "Custom")
+            Text(customized ? "Customized" : dialSummary(profile))
                 .font(.caption2)
                 .foregroundStyle(.secondary)
                 .lineLimit(1)
@@ -195,6 +188,12 @@ struct CompressionGauge: View {
             .rotationEffect(.degrees(startAngle))
     }
 
+    /// Where a profile sits on the dial, from 0 (lossless) to 1 (maximum), evenly spaced by rank.
+    private func position(of profile: CompressionProfile) -> Double {
+        guard let index = detents.firstIndex(where: { $0.id == profile.id }) else { return 0 }
+        return Double(index) / Double(detents.count - 1)
+    }
+
     private func angle(for level: Double) -> Angle {
         .degrees(startAngle + sweep * level)
     }
@@ -220,7 +219,7 @@ struct CompressionGauge: View {
                 }
                 guard ignoringDrag == false else { return }
                 let target = level(at: value.location)
-                if let nearest = detents.min(by: { abs($0.compressionLevel - target) < abs($1.compressionLevel - target) }) {
+                if let nearest = detents.min(by: { abs(position(of: $0) - target) < abs(position(of: $1) - target) }) {
                     select(nearest)
                 }
             }
@@ -228,14 +227,9 @@ struct CompressionGauge: View {
     }
 
     private func step(_ delta: Int) -> KeyPress.Result {
-        let current = model.selectedProfile.compressionLevel
-        let target: CompressionProfile?
-        if delta > 0 {
-            target = detents.first { $0.compressionLevel > current + 0.001 }
-        } else {
-            target = detents.last { $0.compressionLevel < current - 0.001 }
-        }
-        if let target { select(target) }
+        guard let index = detents.firstIndex(where: { $0.id == model.selectedProfileID }) else { return .handled }
+        let target = min(max(index + delta, 0), detents.count - 1)
+        select(detents[target])
         return .handled
     }
 

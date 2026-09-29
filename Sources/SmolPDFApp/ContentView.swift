@@ -119,7 +119,7 @@ struct BottomBar: View {
         HStack(spacing: 12) {
             Spacer()
             Picker("Profile", selection: $model.selectedProfileID) {
-                ForEach(model.allProfiles) { Text($0.name).tag($0.id) }
+                ForEach(CompressionProfile.builtIns) { Text(model.displayName(of: $0)).tag($0.id) }
             }
             .labelsHidden()
             .fixedSize()

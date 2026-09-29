@@ -1,4 +1,5 @@
 import AppKit
+import SmolPDFCore
 import SwiftUI
 
 @main
@@ -25,9 +26,10 @@ struct SmolPDFApp: App {
                     .disabled(!model.canCompress)
                 Divider()
                 Picker("Profile", selection: $model.selectedProfileID) {
-                    ForEach(model.allProfiles) { Text($0.name).tag($0.id) }
+                    ForEach(CompressionProfile.builtIns) { Text(model.displayName(of: $0)).tag($0.id) }
                 }
-                Button("New Profile from Selected") { model.duplicateSelectedProfile() }
+                Button("Reset Profile") { model.resetProfile(model.selectedProfileID) }
+                    .disabled(!model.isCustomized(model.selectedProfileID) || model.isCompressing)
                 Divider()
                 Button("Close File") { model.close() }
                     .keyboardShortcut(.delete, modifiers: [.command, .shift])

@@ -63,7 +63,8 @@ final class AppModel {
     var current: PDFItem?
     /// The history entry of the current file, highlighted in the sidebar.
     var selectedHistoryID: HistoryEntry.ID?
-    var customProfiles: [CompressionProfile] = [] { didSet { saveProfiles() } }
+    /// User changes to built-in profiles, keyed by profile ID. Kept until the profile is reset.
+    var profileOverrides: [UUID: CompressionProfile] = [:] { didSet { saveProfiles() } }
     /// Finished compressions, newest first. Persists across launches.
     var history: [HistoryEntry] = [] { didSet { saveHistory() } }
     var selectedProfileID: UUID = CompressionProfile.medium.id {
@@ -78,7 +79,7 @@ final class AppModel {
     let settings = AppSettings()
 
     private enum Keys {
-        static let profiles = "customProfiles"
+        static let profiles = "profileOverrides"
         static let selectedProfile = "selectedProfile"
         static let history = "history"
     }
@@ -88,53 +89,48 @@ final class AppModel {
     private init() {
         if let data = UserDefaults.standard.data(forKey: Keys.profiles),
            let profiles = try? JSONDecoder().decode([CompressionProfile].self, from: data) {
-            customProfiles = profiles
+            let ids = Set(CompressionProfile.builtIns.map(\.id))
+            profileOverrides = Dictionary(profiles.filter { ids.contains($0.id) }.map { ($0.id, $0) }) { a, _ in a }
         }
         if let data = UserDefaults.standard.data(forKey: Keys.history),
            let entries = try? JSONDecoder().decode([HistoryEntry].self, from: data) {
             history = entries
         }
         if let raw = UserDefaults.standard.string(forKey: Keys.selectedProfile),
-           let id = UUID(uuidString: raw), allProfiles.contains(where: { $0.id == id }) {
+           let id = UUID(uuidString: raw), CompressionProfile.builtIns.contains(where: { $0.id == id }) {
             selectedProfileID = id
         }
     }
 
     // MARK: Profiles
 
-    var allProfiles: [CompressionProfile] { CompressionProfile.builtIns + customProfiles }
-
+    /// The selected built-in profile, with the user's changes to it applied.
     var selectedProfile: CompressionProfile {
-        allProfiles.first { $0.id == selectedProfileID } ?? .medium
+        profileOverrides[selectedProfileID]
+            ?? CompressionProfile.builtIns.first { $0.id == selectedProfileID }
+            ?? .medium
+    }
+
+    func isCustomized(_ id: UUID) -> Bool {
+        profileOverrides[id] != nil
+    }
+
+    /// The profile's name, marked when the user changed its settings.
+    func displayName(of profile: CompressionProfile) -> String {
+        isCustomized(profile.id) ? "\(profile.name) (customized)" : profile.name
     }
 
     func updateProfile(_ profile: CompressionProfile) {
-        guard let index = customProfiles.firstIndex(where: { $0.id == profile.id }) else { return }
-        customProfiles[index] = profile
+        guard let builtIn = CompressionProfile.builtIns.first(where: { $0.id == profile.id }) else { return }
+        profileOverrides[profile.id] = profile == builtIn ? nil : profile
     }
 
-    @discardableResult
-    func duplicateSelectedProfile() -> CompressionProfile {
-        let base = selectedProfile
-        var name = base.isBuiltIn ? "Custom" : "\(base.name) Copy"
-        var n = 2
-        while allProfiles.contains(where: { $0.name == name }) {
-            name = (base.isBuiltIn ? "Custom" : "\(base.name) Copy") + " \(n)"
-            n += 1
-        }
-        let copy = base.duplicate(named: name)
-        customProfiles.append(copy)
-        selectedProfileID = copy.id
-        return copy
-    }
-
-    func deleteProfile(_ id: UUID) {
-        customProfiles.removeAll { $0.id == id }
-        if selectedProfileID == id { selectedProfileID = CompressionProfile.medium.id }
+    func resetProfile(_ id: UUID) {
+        profileOverrides[id] = nil
     }
 
     private func saveProfiles() {
-        if let data = try? JSONEncoder().encode(customProfiles) {
+        if let data = try? JSONEncoder().encode(Array(profileOverrides.values)) {
             UserDefaults.standard.set(data, forKey: Keys.profiles)
         }
     }
@@ -161,8 +157,8 @@ final class AppModel {
         if !entry.keptOriginal { loadCompressedThumbnail(for: item, from: entry.outputURL) }
     }
 
-    private func record(_ result: CompressionResult, profile: CompressionProfile) -> HistoryEntry {
-        let entry = HistoryEntry(result: result, profileName: profile.name)
+    private func record(_ result: CompressionResult, profileName: String) -> HistoryEntry {
+        let entry = HistoryEntry(result: result, profileName: profileName)
         history.insert(entry, at: 0)
         if history.count > Self.historyLimit { history.removeLast(history.count - Self.historyLimit) }
         return entry
@@ -274,6 +270,7 @@ final class AppModel {
         isCompressing = true
         item.status = .compressing
         let profile = selectedProfile
+        let profileName = displayName(of: profile)
         let location = settings.outputLocation
         let keepOriginal = settings.keepOriginalIfLarger
         let url = item.url, password = item.password
@@ -290,8 +287,8 @@ final class AppModel {
             switch outcome {
             case .success(let result):
                 item.status = .done(result)
-                item.profileName = profile.name
-                let entry = record(result, profile: profile)
+                item.profileName = profileName
+                let entry = record(result, profileName: profileName)
                 if current === item { selectedHistoryID = entry.id }
                 if !result.keptOriginal { loadCompressedThumbnail(for: item, from: result.outputURL) }
                 if settings.revealWhenDone, !result.keptOriginal {
