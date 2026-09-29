@@ -1,3 +1,4 @@
+import QuickLookThumbnailing
 import SmolPDFCore
 import SwiftUI
 import UniformTypeIdentifiers
@@ -100,14 +101,19 @@ struct FileHistorySidebar: View {
 struct HistoryRow: View {
     let entry: HistoryEntry
 
+    @Environment(\.displayScale) private var displayScale
+    @State private var thumbnail: NSImage?
+
     private static let pdfIcon = NSWorkspace.shared.icon(for: .pdf)
+    private static let thumbnailSize = CGSize(width: 28, height: 28)
 
     var body: some View {
         let exists = entry.fileExists
         HStack(spacing: 8) {
-            Image(nsImage: Self.pdfIcon)
+            Image(nsImage: thumbnail ?? Self.pdfIcon)
                 .resizable()
-                .frame(width: 28, height: 28)
+                .aspectRatio(contentMode: .fit)
+                .frame(width: Self.thumbnailSize.width, height: Self.thumbnailSize.height)
             VStack(alignment: .leading, spacing: 1) {
                 Text(entry.name)
                     .lineLimit(1)
@@ -122,6 +128,16 @@ struct HistoryRow: View {
         .padding(.vertical, 2)
         .help(exists ? "\(entry.outputURL.path)\n\(entry.profileName) · \(entry.date.formatted())"
                      : "File no longer exists")
+        .task(id: entry.outputURL) { await loadThumbnail(exists: exists) }
+    }
+
+    /// Renders the first page via Quick Look, which caches thumbnails and keeps the PDF icon for locked files.
+    private func loadThumbnail(exists: Bool) async {
+        guard exists else { thumbnail = nil; return }
+        let request = QLThumbnailGenerator.Request(
+            fileAt: entry.outputURL, size: Self.thumbnailSize, scale: displayScale, representationTypes: .thumbnail
+        )
+        thumbnail = try? await QLThumbnailGenerator.shared.generateBestRepresentation(for: request).nsImage
     }
 
     private var details: String {
