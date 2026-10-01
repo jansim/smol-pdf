@@ -1,0 +1,7 @@
+// jpeglib.h is not self-contained (it needs <stdio.h> first), so it is included textually.
+module CJPEG {
+    textual header "jpeglib.h"
+    textual header "jconfig.h"
+    textual header "jmorecfg.h"
+    textual header "jerror.h"
+}
