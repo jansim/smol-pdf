@@ -171,7 +171,7 @@ struct CompressionGauge: View {
 
     /// A short summary that fits inside the dial; the inspector below shows the details.
     private func dialSummary(_ profile: CompressionProfile) -> String {
-        guard profile.compressImages else { return "Images untouched" }
+        guard profile.compressImages else { return "Lossless" }
         let quality = Format.percent(profile.imageQuality)
         return profile.maxResolution.map { "\($0) dpi · JPEG \(quality)" } ?? "JPEG \(quality)"
     }

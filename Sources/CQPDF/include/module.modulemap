@@ -1,0 +1,6 @@
+// qpdf's headers include fragments that are not self-contained (auto_job_*.hh), so they are
+// included textually rather than built as a Clang module.
+module CQPDF {
+    header "qpdf/DLL.h"
+    export *
+}
