@@ -85,7 +85,8 @@ final class QuartzComparisonTests: XCTestCase {
     }
 
     private func pct(_ size: Int64, _ original: Int64) -> String {
-        String(format: "−%.1f%%", 100 * (1 - Double(size) / Double(original)))
+        let change = 100 * (Double(size) / Double(original) - 1)
+        return String(format: change > 0 ? "+%.1f%%" : "−%.1f%%", abs(change))
     }
 
     private func db(_ value: Double) -> String {
