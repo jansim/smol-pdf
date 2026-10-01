@@ -134,12 +134,15 @@ final class PDFCompressorTests: XCTestCase {
         let note = PDFAnnotation(bounds: CGRect(x: 10, y: 10, width: 20, height: 20), forType: .text, withProperties: nil)
         doc.page(at: 0)!.addAnnotation(note)
         XCTAssertTrue(doc.write(to: input))
+        // PDFKit saves the note with its popup, so count what's in the file.
+        let annotations = try XCTUnwrap(PDFDocument(url: input)?.page(at: 0)?.annotations.count)
+        XCTAssertGreaterThan(annotations, 0)
 
         let kept = dir.appendingPathComponent("kept.pdf")
         _ = try PDFCompressor.compress(input: input, output: kept, profile: .medium)
         let keptDoc = try XCTUnwrap(PDFDocument(url: kept))
         XCTAssertEqual(keptDoc.outlineRoot?.numberOfChildren, 1)
-        XCTAssertEqual(keptDoc.page(at: 0)?.annotations.count, 1)
+        XCTAssertEqual(keptDoc.page(at: 0)?.annotations.count, annotations)
 
         var profile = CompressionProfile.medium.duplicate()
         profile.removeBookmarks = true
