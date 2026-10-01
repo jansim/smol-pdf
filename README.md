@@ -44,6 +44,14 @@ smolpdf -o ~/Desktop/small *.pdf            # write into a folder
 smolpdf --help
 ```
 
+To compare settings (and PDF Squeezer's `pdfs` tool, if installed) on your own files,
+`scripts/benchmark.sh` compresses them with each profile and reports run time and output size:
+
+```sh
+scripts/benchmark.sh --build ~/Documents/*.pdf
+scripts/benchmark.sh -n 3 -c 'q40=-q 40 -r 120' -P ~/Profiles/Medium.pdfscp list.txt
+```
+
 ## How it works
 
 Compression runs through PDFKit and a generated ColorSync (Quartz) filter. This is the same
@@ -60,7 +68,7 @@ Code layout:
 | `Sources/SmolPDFApp` | SwiftUI app |
 | `Sources/smolpdf` | Command-line tool |
 | `Tests/SmolPDFCoreTests` | Engine tests using generated PDFs |
-| `scripts/` | App bundling and icon generation |
+| `scripts/` | App bundling, icon generation and benchmarking |
 
 ## Known limitations
 
