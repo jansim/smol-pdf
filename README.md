@@ -53,7 +53,7 @@ smolpdf --help
 ## How it works
 
 The engine (`Sources/SmolPDFEngine`, C++) rewrites the PDF with [qpdf](https://github.com/qpdf/qpdf).
-Text, fonts and vector graphics are kept exactly as they are. For every image it makes several
+Text, fonts and vector graphics are kept as they are. For every image it makes several
 candidate encodings and keeps the smallest, including the original; lossless forms win when they
 are within 10% of a lossy one, since they stay sharp.
 
@@ -75,9 +75,8 @@ After the images, every other stream (page content, fonts, ...) is recompressed 
 identical streams (say, a font embedded once per page) are stored once, unused resources are
 dropped, and the file is written with object streams. Encryption is kept as it was.
 
-Grayscale also runs the system “Gray Tone” Quartz filter first, which converts vector graphics.
-Files qpdf can't read fall back to the Quartz filter alone (the mechanism behind Preview's
-“Reduce File Size”).
+Grayscale converts images the same way, and rewrites the colors of text and vector graphics
+(color operators, color spaces, palettes and shadings) to their gray equivalents.
 
 Set `SMOL_DEBUG=1` to see every candidate considered for each image on stderr.
 
@@ -98,7 +97,8 @@ Code layout:
 - Fonts are not subsetted; a fully embedded font stays fully embedded.
 - JPEG 2000, JBIG2 and CCITT images already in a file are left as they are, and nothing is stored
   as JPEG 2000. JBIG2 is lossless only (no symbol coding).
-- Grayscale goes through Quartz, which rewrites the document (as before) before the engine runs.
+- Grayscale leaves spot colors (Separation, DeviceN) and Lab colors as they are.
+- Files that qpdf can't repair can't be compressed.
 - CMYK images are only re-encoded as JPEG when they were JPEGs already, to keep their colors exact.
 
 ## Licenses

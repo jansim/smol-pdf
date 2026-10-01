@@ -21,8 +21,8 @@ typedef struct SmolOptions {
     double jpeg_quality;
     /* Downsample images shown above this resolution, in dpi. 0 keeps the resolution. */
     int max_resolution;
-    /* Store all images in grayscale. */
-    int grayscale_images;
+    /* Convert everything (text, vector graphics and images) to grayscale. */
+    int grayscale;
     /* Store black-and-white scans (gray images that are almost only black and white) as 1-bit
        images. Used with lossy_images. */
     int monochrome_scans;

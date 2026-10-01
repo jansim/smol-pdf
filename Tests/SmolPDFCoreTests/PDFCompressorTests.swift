@@ -58,6 +58,51 @@ final class PDFCompressorTests: XCTestCase {
         XCTAssertEqual(color.greenComponent, color.blueComponent, accuracy: 0.03)
     }
 
+    func testGrayscaleConvertsTextAndGraphics() throws {
+        let input = dir.appendingPathComponent("vector.pdf")
+        var box = CGRect(x: 0, y: 0, width: 595, height: 842)
+        let ctx = try XCTUnwrap(CGContext(input as CFURL, mediaBox: &box, nil))
+        ctx.beginPDFPage(nil)
+        ctx.setFillColor(CGColor(srgbRed: 0.9, green: 0.1, blue: 0.1, alpha: 1))
+        ctx.fill(CGRect(x: 40, y: 600, width: 200, height: 150))
+        ctx.setStrokeColor(CGColor(genericCMYKCyan: 1, magenta: 0, yellow: 1, black: 0, alpha: 1))
+        ctx.setLineWidth(12)
+        ctx.stroke(CGRect(x: 300, y: 600, width: 200, height: 150))
+        let gradient = try XCTUnwrap(CGGradient(
+            colorsSpace: CGColorSpace(name: CGColorSpace.sRGB),
+            colors: [CGColor(srgbRed: 0, green: 0, blue: 1, alpha: 1), CGColor(srgbRed: 1, green: 0.8, blue: 0, alpha: 1)] as CFArray,
+            locations: [0, 1]
+        ))
+        ctx.saveGState()
+        ctx.clip(to: CGRect(x: 40, y: 350, width: 500, height: 200))
+        ctx.drawLinearGradient(gradient, start: CGPoint(x: 40, y: 0), end: CGPoint(x: 540, y: 0), options: [])
+        ctx.restoreGState()
+        let text = NSAttributedString(string: "Colored text", attributes: [
+            .font: CTFontCreateWithName("Helvetica-Bold" as CFString, 48, nil),
+            .foregroundColor: CGColor(srgbRed: 0.1, green: 0.6, blue: 0.2, alpha: 1),
+        ])
+        ctx.textPosition = CGPoint(x: 40, y: 200)
+        CTLineDraw(CTLineCreateWithAttributedString(text), ctx)
+        ctx.endPDFPage()
+        ctx.closePDF()
+
+        var profile = CompressionProfile.lossless.duplicate()
+        profile.grayscale = true
+        let output = dir.appendingPathComponent("gray.pdf")
+        _ = try PDFCompressor.compress(input: input, output: output, profile: profile, keepOriginalIfLarger: false)
+
+        let pixels = try render(output)
+        var colored = 0, dark = 0
+        for i in stride(from: 0, to: pixels.count, by: 4) {
+            let rgb = [Int(pixels[i]), Int(pixels[i + 1]), Int(pixels[i + 2])]
+            if rgb.max()! - rgb.min()! > 6 { colored += 1 }
+            if rgb.max()! < 200 { dark += 1 }
+        }
+        XCTAssertEqual(colored, 0, "every color must be gray")
+        XCTAssertGreaterThan(dark, pixels.count / 4 / 20, "the drawing must still be there")
+        XCTAssertTrue(PDFDocument(url: output)?.string?.contains("Colored text") ?? false)
+    }
+
     func testPasswordProtectedInput() throws {
         let plain = try makePDF(named: "plain.pdf")
         let locked = dir.appendingPathComponent("locked.pdf")

@@ -265,8 +265,9 @@ extern "C" SmolStatus smol_compress(
         QPDFPageDocumentHelper pages(pdf);
         for (auto& page : pages.getAllPages()) {
             // Larger inline images become image objects so they can be optimised too.
+            // With grayscale all of them, so none keeps its colours.
             try {
-                page.externalizeInlineImages(4096);
+                page.externalizeInlineImages(opts.grayscale ? 0 : 4096);
             } catch (std::exception&) {
             }
         }
@@ -276,6 +277,7 @@ extern "C" SmolStatus smol_compress(
         }
         mergeDuplicateStreams(pdf, stats); // before images, so each is processed once
         optimizeImages(pdf, opts, stats);
+        if (opts.grayscale) convertToGray(pdf);
         recompressStreams(pdf, stats);
         mergeDuplicateStreams(pdf, stats); // images that became identical
     } catch (std::exception& e) {
@@ -284,6 +286,14 @@ extern "C" SmolStatus smol_compress(
     }
 
     try {
+        // Only standard trailer keys, and a /Size for the writer to fill in: damaged files can have
+        // misspelled keys, which would otherwise be copied and leave the output without a /Size.
+        QPDFObjectHandle trailer = pdf.getTrailer();
+        for (auto const& key : trailer.getKeys()) {
+            if (key != "/Root" && key != "/Info" && key != "/ID" && key != "/Encrypt") trailer.removeKey(key);
+        }
+        trailer.replaceKey("/Size", QPDFObjectHandle::newInteger(0));
+
         Pl_Flate::setCompressionLevel(9);
         QPDFWriter writer(pdf, output);
         writer.setObjectStreamMode(qpdf_o_generate);

@@ -53,6 +53,11 @@ struct Resolutions {
 
 Resolutions findImageResolutions(QPDF& pdf);
 
+// Grayscale.cc ------------------------------------------------------------------------------------
+
+// Converts the colours of text and vector graphics (not images) to gray.
+void convertToGray(QPDF& pdf);
+
 // Images.cc ---------------------------------------------------------------------------------------
 
 void optimizeImages(QPDF& pdf, SmolOptions const& options, SmolStats& stats);

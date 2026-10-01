@@ -458,11 +458,9 @@ void Job::addFlate(Bytes const& samples, int w, int h, int n, int bpc, Candidate
     bool try_plain = !predictor || samples.size() <= (4u << 20);
     bool try_predicted = predictor || (bpc < 8 && samples.size() <= (4u << 20));
     auto flate = [&](Candidate& c, Bytes input, char const* label) {
-        double t = now();
         c.data = deflate(input.data(), input.size(), estimate_level);
         c.pending = std::move(input);
         c.label = label;
-        if (debugging()) c.label += " " + std::to_string(int((now() - t) * 1000)) + "ms";
     };
     if (try_plain) {
         Candidate c = base;
@@ -498,9 +496,8 @@ void Job::addFlate(Bytes const& samples, int w, int h, int n, int bpc, Candidate
         Candidate j = base;
         j.filter = name("/JBIG2Decode");
         j.parms = QPDFObjectHandle::newNull();
-        double t = now();
         j.data = jbig2Generic(reinterpret_cast<uint8_t const*>(samples.data()), w, h);
-        j.label = "jbig2 " + std::to_string(int((now() - t) * 1000)) + "ms";
+        j.label = "jbig2";
         candidates_.push_back(std::move(j));
     }
 }
@@ -585,7 +582,6 @@ void Job::run(double dpi, bool is_smask, bool has_matte, SmolStats& stats) {
         if (dct_) {
             size_t size = 0;
             auto const* data = reinterpret_cast<unsigned char const*>(raw_.data());
-            double t = now();
             if (unsigned char* optimized = smol_jpeg_optimize(data, raw_.size(), &size)) {
                 Candidate c;
                 c.data.assign(reinterpret_cast<char*>(optimized), size);
@@ -593,7 +589,7 @@ void Job::run(double dpi, bool is_smask, bool has_matte, SmolStats& stats) {
                 c.filter = name("/DCTDecode");
                 c.parms = QPDFObjectHandle::newNull();
                 c.w = w_, c.h = h_, c.bpc = 8;
-                c.label = "jpeg-optimized " + std::to_string(int((now() - t) * 1000)) + "ms";
+                c.label = "jpeg-optimized";
                 candidates_.push_back(std::move(c));
             }
             SmolJPEGInfo info{};
@@ -642,7 +638,7 @@ void Job::run(double dpi, bool is_smask, bool has_matte, SmolStats& stats) {
                 uint8_t const* values = cs.indexed ? reinterpret_cast<uint8_t const*>(cs.palette.data()) : r.px.data();
                 size_t count = cs.indexed ? cs.palette.size() / size_t(cs.base_n) : r.px.size() / size_t(r.n);
                 Grayness g = cs.family == Family::RGB ? grayness(values, count) : Grayness::Color;
-                bool to_gray = g == Grayness::Exact || (g == Grayness::Near && lossy_ok) || options_.grayscale_images;
+                bool to_gray = g == Grayness::Exact || (g == Grayness::Near && lossy_ok) || options_.grayscale;
                 if (to_gray) {
                     if (!cs.indexed) normalize();
                     values = cs.indexed ? reinterpret_cast<uint8_t const*>(cs.palette.data()) : r.px.data();
@@ -723,7 +719,6 @@ void Job::run(double dpi, bool is_smask, bool has_matte, SmolStats& stats) {
                 int quality = int(std::lround(std::clamp(options_.jpeg_quality, 0.0, 1.0) * 100));
                 quality = std::clamp(quality, 1, 100);
                 size_t size = 0;
-                double t = now();
                 unsigned char* jpg = smol_jpeg_encode(r.px.data(), r.w, r.h, r.n, quality, dct_ ? &jpeg_ : nullptr, &size);
                 if (jpg) {
                     Candidate c;
@@ -736,7 +731,7 @@ void Job::run(double dpi, bool is_smask, bool has_matte, SmolStats& stats) {
                     c.drop_decode = !keep_decode;
                     c.lossy = true;
                     c.resampled = resampled;
-                    c.label = "jpeg q" + std::to_string(quality) + " " + std::to_string(int((now() - t) * 1000)) + "ms";
+                    c.label = "jpeg q" + std::to_string(quality);
                     // Re-encoding a JPEG without other changes only adds artefacts; it must pay.
                     if (dct_ && !changed && c.data.size() > original * 9 / 10) c.data.clear();
                     if (!c.data.empty()) candidates_.push_back(std::move(c));
