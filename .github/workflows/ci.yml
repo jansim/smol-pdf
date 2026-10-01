@@ -43,4 +43,7 @@ jobs:
         run: swift test --skip-build
 
       - name: CLI smoke test
-        run: .build/debug/smolpdf --help
+        run: |
+          .build/debug/smolpdf --help
+          .build/debug/smolpdf -v -p lossless -o "$RUNNER_TEMP/lossless" test-document.pdf
+          .build/debug/smolpdf -v -p maximum -x all -o "$RUNNER_TEMP/maximum" test-document.pdf

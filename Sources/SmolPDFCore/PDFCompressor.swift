@@ -12,10 +12,12 @@ public struct CompressionResult: Hashable, Sendable {
     public var keptOriginal: Bool
     /// Where the file previously at `outputURL` ended up in the Trash, e.g. the original when replacing it.
     public var trashedURL: URL? = nil
+    /// What the engine did, when it ran.
+    public var details: CompressionDetails? = nil
 
     public init(
         inputURL: URL, outputURL: URL, originalSize: Int64, compressedSize: Int64,
-        keptOriginal: Bool, trashedURL: URL? = nil
+        keptOriginal: Bool, trashedURL: URL? = nil, details: CompressionDetails? = nil
     ) {
         self.inputURL = inputURL
         self.outputURL = outputURL
@@ -23,6 +25,7 @@ public struct CompressionResult: Hashable, Sendable {
         self.compressedSize = compressedSize
         self.keptOriginal = keptOriginal
         self.trashedURL = trashedURL
+        self.details = details
     }
 
     /// The uncompressed file: the input, or its copy in the Trash when it was replaced.
@@ -55,7 +58,10 @@ public enum CompressionError: LocalizedError, Equatable {
 public enum PDFCompressor {
     /// Compresses `input` according to `profile` and writes the result to `output`.
     ///
-    /// Images are re-encoded through a Quartz filter, which keeps text and vector graphics intact.
+    /// The engine (qpdf based) re-encodes each image in the format that suits it best, keeps text and
+    /// vector graphics untouched, and cleans up the file structure. Grayscale additionally runs the
+    /// system's Quartz "Gray Tone" filter first, which also converts vector graphics. Files the engine
+    /// can't process fall back to the Quartz filter alone.
     /// If `output` already exists it is moved to the Trash first (this is how "replace original" works).
     /// With `keepOriginalIfLarger`, a result that isn't smaller than the input is discarded.
     public static func compress(
@@ -68,29 +74,28 @@ public enum PDFCompressor {
         let fm = FileManager.default
         let originalSize = fileSize(input)
 
-        guard let document = PDFDocument(url: input) else { throw CompressionError.cannotOpen }
-        var writeOptions: [PDFDocumentWriteOption: Any] = [:]
-        if document.isLocked {
-            guard let password, !password.isEmpty else { throw CompressionError.passwordRequired }
-            guard document.unlock(withPassword: password) else { throw CompressionError.wrongPassword }
-            // Keep the output protected with the same password.
-            writeOptions[.userPasswordOption] = password
-            writeOptions[.ownerPasswordOption] = password
-        }
-
-        applyStructuralChanges(to: document, profile: profile)
-
         let workDir = try fm.url(
             for: .itemReplacementDirectory, in: .userDomainMask,
             appropriateFor: output.deletingLastPathComponent(), create: true
         )
         defer { try? fm.removeItem(at: workDir) }
-
-        if let filter = makeFilter(for: profile) {
-            writeOptions[.quartzFilter] = filter
-        }
         let tempURL = workDir.appendingPathComponent("out.pdf")
-        guard document.write(to: tempURL, withOptions: writeOptions) else { throw CompressionError.writeFailed }
+
+        var source = input
+        if profile.grayscale, let gray = grayscaleFilter() {
+            source = workDir.appendingPathComponent("gray.pdf")
+            try quartzCompress(input: input, output: source, filter: gray, profile: nil, password: password)
+        }
+
+        var details: CompressionDetails?
+        do {
+            details = try SmolEngine.compress(input: source, output: tempURL, profile: profile, password: password)
+        } catch let error as CompressionError where error == .passwordRequired || error == .wrongPassword {
+            throw error
+        } catch {
+            // The engine can't handle this file (e.g. damaged beyond qpdf's repair): use Quartz alone.
+            try quartzCompress(input: input, output: tempURL, filter: makeFilter(for: profile), profile: profile, password: password)
+        }
 
         let compressedSize = fileSize(tempURL)
         if keepOriginalIfLarger && compressedSize >= originalSize {
@@ -108,8 +113,27 @@ public enum PDFCompressor {
         return CompressionResult(
             inputURL: input, outputURL: output,
             originalSize: originalSize, compressedSize: compressedSize, keptOriginal: false,
-            trashedURL: trashedURL as URL?
+            trashedURL: trashedURL as URL?, details: details
         )
+    }
+
+    /// Rewrites the file through PDFKit with a Quartz filter (the mechanism of Preview's "Reduce File Size").
+    /// With a `profile`, its document options are applied too.
+    static func quartzCompress(
+        input: URL, output: URL, filter: QuartzFilter?, profile: CompressionProfile?, password: String?
+    ) throws {
+        guard let document = PDFDocument(url: input) else { throw CompressionError.cannotOpen }
+        var writeOptions: [PDFDocumentWriteOption: Any] = [:]
+        if document.isLocked {
+            guard let password, !password.isEmpty else { throw CompressionError.passwordRequired }
+            guard document.unlock(withPassword: password) else { throw CompressionError.wrongPassword }
+            // Keep the output protected with the same password.
+            writeOptions[.userPasswordOption] = password
+            writeOptions[.ownerPasswordOption] = password
+        }
+        if let profile { applyStructuralChanges(to: document, profile: profile) }
+        if let filter { writeOptions[.quartzFilter] = filter }
+        guard document.write(to: output, withOptions: writeOptions) else { throw CompressionError.writeFailed }
     }
 
     static func applyStructuralChanges(to document: PDFDocument, profile: CompressionProfile) {
@@ -127,7 +151,7 @@ public enum PDFCompressor {
         }
     }
 
-    /// Builds the ColorSync filter that is applied while writing, or `nil` when nothing needs filtering.
+    /// Builds the ColorSync filter for the Quartz fallback, or `nil` when nothing needs filtering.
     ///
     /// Image settings are the same mechanism as Preview's "Reduce File Size" filter, with tunable values.
     /// Grayscale reuses the system "Gray Tone" filter and merges the image settings into it, so
