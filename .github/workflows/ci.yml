@@ -47,3 +47,10 @@ jobs:
           .build/debug/smolpdf --help
           .build/debug/smolpdf -v -p lossless -o "$RUNNER_TEMP/lossless" test-document.pdf
           .build/debug/smolpdf -v -p maximum -x all -o "$RUNNER_TEMP/maximum" test-document.pdf
+
+      # Temporary: engine vs. Quartz comparison on the generated corpus.
+      - name: Compare with Quartz
+        run: |
+          python3 -m pip install --quiet --break-system-packages pikepdf pillow
+          scripts/compare/compare.sh
+          cat .build/compare-corpus/comparison.md
