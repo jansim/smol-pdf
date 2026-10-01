@@ -494,6 +494,14 @@ void Job::addFlate(Bytes const& samples, int w, int h, int n, int bpc, Candidate
             {"/Rows", intObj(h)},
         });
         candidates_.push_back(std::move(c));
+
+        Candidate j = base;
+        j.filter = name("/JBIG2Decode");
+        j.parms = QPDFObjectHandle::newNull();
+        double t = now();
+        j.data = jbig2Generic(reinterpret_cast<uint8_t const*>(samples.data()), w, h);
+        j.label = "jbig2 " + std::to_string(int((now() - t) * 1000)) + "ms";
+        candidates_.push_back(std::move(j));
     }
 }
 
@@ -629,7 +637,7 @@ void Job::run(double dpi, bool is_smask, bool has_matte, SmolStats& stats) {
 
             // 2. Gray, when the image already is (exactly, or within noise for lossy profiles),
             //    or when grayscale was asked for.
-            bool changed = false;
+            bool changed = lossy; // 16-bit reduced to 8
             if (can_recolor && (cs.family == Family::RGB || cs.family == Family::CMYK)) {
                 uint8_t const* values = cs.indexed ? reinterpret_cast<uint8_t const*>(cs.palette.data()) : r.px.data();
                 size_t count = cs.indexed ? cs.palette.size() / size_t(cs.base_n) : r.px.size() / size_t(r.n);
@@ -675,8 +683,10 @@ void Job::run(double dpi, bool is_smask, bool has_matte, SmolStats& stats) {
             if (!bilevel && r.n == 1 && !cs.indexed) {
                 bilevel = std::all_of(r.px.begin(), r.px.end(), [](uint8_t v) { return v == 0 || v == 255; });
             }
+            // With /Matte, an image and its soft mask must keep equal sizes, so neither is resampled.
+            bool matte = has_matte || dict_.hasKey("/Matte");
             bool resampled = false;
-            if (lossy_ok && !bilevel && options_.max_resolution > 0 && dpi > 0 &&
+            if (lossy_ok && !bilevel && !matte && options_.max_resolution > 0 && dpi > 0 &&
                 dpi > options_.max_resolution * downsample_threshold && !color_key_ &&
                 !(cs.indexed && !default_decode_)) {
                 double scale = options_.max_resolution / dpi;

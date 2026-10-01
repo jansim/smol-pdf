@@ -291,4 +291,201 @@ Bytes ccittG4(uint8_t const* bits, int width, int height) {
     return w.finish();
 }
 
+// JBIG2 ------------------------------------------------------------------------------------------
+//
+// A lossless generic region (ITU-T T.88 6.2) coded with the MQ arithmetic coder (Annex E), as an
+// embedded stream for PDF's JBIG2Decode: a page information segment and an immediate generic
+// region segment, without file header or end-of-page segment.
+
+namespace {
+
+struct MQState {
+    uint16_t qe;
+    uint8_t nmps, nlps, swtch;
+};
+
+MQState const mq_table[47] = {
+    {0x5601, 1, 1, 1},   {0x3401, 2, 6, 0},   {0x1801, 3, 9, 0},   {0x0AC1, 4, 12, 0},
+    {0x0521, 5, 29, 0},  {0x0221, 38, 33, 0}, {0x5601, 7, 6, 1},   {0x5401, 8, 14, 0},
+    {0x4801, 9, 14, 0},  {0x3801, 10, 14, 0}, {0x3001, 11, 17, 0}, {0x2401, 12, 18, 0},
+    {0x1C01, 13, 20, 0}, {0x1601, 29, 21, 0}, {0x5601, 15, 14, 1}, {0x5401, 16, 14, 0},
+    {0x5101, 17, 15, 0}, {0x4801, 18, 16, 0}, {0x3801, 19, 17, 0}, {0x3401, 20, 18, 0},
+    {0x3001, 21, 19, 0}, {0x2801, 22, 19, 0}, {0x2401, 23, 20, 0}, {0x2201, 24, 21, 0},
+    {0x1C01, 25, 22, 0}, {0x1801, 26, 23, 0}, {0x1601, 27, 24, 0}, {0x1401, 28, 25, 0},
+    {0x1201, 29, 26, 0}, {0x1101, 30, 27, 0}, {0x0AC1, 31, 28, 0}, {0x09C1, 32, 29, 0},
+    {0x08A1, 33, 30, 0}, {0x0521, 34, 31, 0}, {0x0441, 35, 32, 0}, {0x02A1, 36, 33, 0},
+    {0x0221, 37, 34, 0}, {0x0141, 38, 35, 0}, {0x0111, 39, 36, 0}, {0x0085, 40, 37, 0},
+    {0x0049, 41, 38, 0}, {0x0025, 42, 39, 0}, {0x0015, 43, 40, 0}, {0x0009, 44, 41, 0},
+    {0x0005, 45, 42, 0}, {0x0001, 45, 43, 0}, {0x5601, 46, 46, 0},
+};
+
+class MQEncoder {
+  public:
+    explicit MQEncoder(size_t contexts) :
+        index_(contexts, 0),
+        mps_(contexts, 0) {}
+
+    void encode(int bit, uint32_t cx) {
+        uint8_t& i = index_[cx];
+        uint8_t& mps = mps_[cx];
+        uint32_t qe = mq_table[i].qe;
+        a_ -= qe;
+        if (bit == mps) {
+            if ((a_ & 0x8000) == 0) {
+                if (a_ < qe) a_ = qe;
+                else c_ += qe;
+                i = mq_table[i].nmps;
+                renormalize();
+            } else {
+                c_ += qe;
+            }
+        } else {
+            if (a_ < qe) c_ += qe;
+            else a_ = qe;
+            if (mq_table[i].swtch) mps = uint8_t(1 - mps);
+            i = mq_table[i].nlps;
+            renormalize();
+        }
+    }
+
+    Bytes finish() {
+        uint32_t temp = c_ + a_;
+        c_ |= 0xFFFF;
+        if (c_ >= temp) c_ -= 0x8000;
+        c_ <<= ct_;
+        byteOut();
+        c_ <<= ct_;
+        byteOut();
+        if (b_ != 0xFF) put(0xFF);
+        put(0xAC);
+        out_.erase(out_.begin()); // the placeholder before the first byte
+        return std::move(out_);
+    }
+
+  private:
+    void put(uint8_t byte) {
+        out_.push_back(char(byte));
+        b_ = byte;
+    }
+
+    void renormalize() {
+        do {
+            a_ <<= 1;
+            c_ <<= 1;
+            if (--ct_ == 0) byteOut();
+        } while ((a_ & 0x8000) == 0);
+    }
+
+    void byteOut() {
+        if (b_ == 0xFF) {
+            put(uint8_t(c_ >> 20));
+            c_ &= 0xFFFFF;
+            ct_ = 7;
+        } else if (c_ < 0x8000000) {
+            put(uint8_t(c_ >> 19));
+            c_ &= 0x7FFFF;
+            ct_ = 8;
+        } else {
+            // Carry into the byte already written.
+            b_ = uint8_t(b_ + 1);
+            out_.back() = char(b_);
+            if (b_ == 0xFF) {
+                c_ &= 0x7FFFFFF;
+                put(uint8_t(c_ >> 20));
+                c_ &= 0xFFFFF;
+                ct_ = 7;
+            } else {
+                put(uint8_t(c_ >> 19));
+                c_ &= 0x7FFFF;
+                ct_ = 8;
+            }
+        }
+    }
+
+    std::vector<uint8_t> index_, mps_;
+    uint32_t a_ = 0x8000, c_ = 0;
+    int ct_ = 12;
+    uint8_t b_ = 0;
+    Bytes out_ = Bytes(1, '\0');
+};
+
+void put32(Bytes& out, uint32_t v) {
+    out.push_back(char(v >> 24));
+    out.push_back(char(v >> 16));
+    out.push_back(char(v >> 8));
+    out.push_back(char(v));
+}
+
+void segment(Bytes& out, uint32_t number, uint8_t type, Bytes const& data) {
+    put32(out, number);
+    out.push_back(char(type)); // flags: 1-byte page association
+    out.push_back(0);          // no referred-to segments
+    out.push_back(1);          // page 1
+    put32(out, uint32_t(data.size()));
+    out += data;
+}
+
+} // namespace
+
+Bytes jbig2Generic(uint8_t const* bits, int width, int height) {
+    size_t stride = (size_t(width) + 7) / 8;
+    // JBIG2 codes black as 1; PDF's JBIG2Decode inverts, so black is sample value 0 as in G4.
+    std::vector<uint8_t> image(stride * size_t(height));
+    for (size_t i = 0; i < image.size(); ++i) image[i] = uint8_t(~bits[i]);
+    if (width % 8) {
+        uint8_t keep = uint8_t(0xFF << (8 - width % 8));
+        for (int y = 0; y < height; ++y) image[stride * size_t(y) + stride - 1] &= keep;
+    }
+    auto pixel = [&](int x, int y) -> uint32_t {
+        if (x < 0 || x >= width || y < 0) return 0;
+        return (image[stride * size_t(y) + size_t(x >> 3)] >> (7 - (x & 7))) & 1;
+    };
+
+    // Generic template 0 with the nominal adaptive pixels, and typical prediction (TPGDON):
+    // rows equal to the one above cost a single decision.
+    MQEncoder mq(1 << 16);
+    int ltp = 0;
+    std::vector<uint8_t> zero(stride, 0);
+    for (int y = 0; y < height; ++y) {
+        uint8_t const* row = image.data() + stride * size_t(y);
+        uint8_t const* above = y ? row - stride : zero.data();
+        int same = std::memcmp(row, above, stride) == 0;
+        mq.encode(same ^ ltp, 0x9B25);
+        ltp = same;
+        if (ltp) continue;
+        for (int x = 0; x < width; ++x) {
+            uint32_t cx = pixel(x - 1, y) | pixel(x - 2, y) << 1 | pixel(x - 3, y) << 2 | pixel(x - 4, y) << 3 |
+                          pixel(x + 3, y - 1) << 4 | pixel(x + 2, y - 1) << 5 | pixel(x + 1, y - 1) << 6 |
+                          pixel(x, y - 1) << 7 | pixel(x - 1, y - 1) << 8 | pixel(x - 2, y - 1) << 9 |
+                          pixel(x - 3, y - 1) << 10 | pixel(x + 2, y - 2) << 11 | pixel(x + 1, y - 2) << 12 |
+                          pixel(x, y - 2) << 13 | pixel(x - 1, y - 2) << 14 | pixel(x - 2, y - 2) << 15;
+            mq.encode(int(pixel(x, y)), cx);
+        }
+    }
+
+    Bytes page;
+    put32(page, uint32_t(width));
+    put32(page, uint32_t(height));
+    put32(page, 0); // resolution unknown
+    put32(page, 0);
+    page.push_back(1); // eventually lossless, default pixel white, OR
+    page.push_back(0); // not striped
+    page.push_back(0);
+
+    Bytes region;
+    put32(region, uint32_t(width));
+    put32(region, uint32_t(height));
+    put32(region, 0); // at 0, 0
+    put32(region, 0);
+    region.push_back(0);        // combination operator OR
+    region.push_back(0x08);     // arithmetic coding, template 0, TPGDON
+    for (int8_t at : {3, -1, -3, -1, 2, -2, -2, -2}) region.push_back(char(at));
+    region += mq.finish();
+
+    Bytes out;
+    segment(out, 0, 48, page);   // page information
+    segment(out, 1, 38, region); // immediate generic region
+    return out;
+}
+
 } // namespace smol

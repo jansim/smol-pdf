@@ -38,6 +38,10 @@ Bytes pngPredict(uint8_t const* data, size_t rows, size_t row_bytes, size_t byte
 // value 0 is coded as black, so with /BlackIs1 false the decoded samples are bit-identical.
 Bytes ccittG4(uint8_t const* bits, int width, int height);
 
+// Lossless JBIG2 (generic region) encoding of the same kind of 1-bit image, as an embedded stream
+// for /JBIG2Decode without globals.
+Bytes jbig2Generic(uint8_t const* bits, int width, int height);
+
 // Placement.cc ------------------------------------------------------------------------------------
 
 struct Resolutions {

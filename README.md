@@ -9,7 +9,12 @@ Earlier files are one click away in the history sidebar.
 ## Features
 
 - **Profiles**: Lossless, Low, Medium, High, Maximum, plus your own custom profiles
-  (image quality, maximum resolution, grayscale, removing metadata, annotations and bookmarks).
+  (image quality, maximum resolution, 1-bit scans, grayscale, and removing metadata, editing data,
+  annotations, bookmarks, attachments and JavaScript).
+- **Each image in the format that suits it**: photos as JPEG, screenshots and diagrams losslessly
+  with a palette, black-and-white scans as 1-bit JBIG2, all at the resolution they are actually
+  shown at. See [How it works](#how-it-works).
+- **Lossless really is lossless**: not a single pixel changes, yet files usually still get smaller.
 - **Text stays text**: only images are re-encoded, so text stays sharp and searchable.
 - **Keeps the original** when compression wouldn't make the file smaller.
 - **Password-protected PDFs**: unlock them in the app; the result keeps the same password.
@@ -40,23 +45,49 @@ The CLI is bundled at `smol-pdf.app/Contents/Resources/smolpdf` (or `swift run s
 ```sh
 smolpdf -p high ~/Documents/scans          # a folder, recursively
 smolpdf -q 50 -r 120 -g report.pdf          # custom quality, resolution, grayscale
+smolpdf -p high -x attachments,javascript -v in.pdf   # strip extras, show what changed
 smolpdf -o ~/Desktop/small *.pdf            # write into a folder
 smolpdf --help
 ```
 
 ## How it works
 
-Compression runs through PDFKit and a generated ColorSync (Quartz) filter. This is the same
-mechanism as Preview's “Reduce File Size”, but with tunable JPEG quality and target resolution.
-Pages are rewritten by Quartz, so text, vector graphics and links are kept, and only raster
-images are downsampled and re-encoded. Grayscale uses the system “Gray Tone” filter, merged into
-the same pass.
+The engine (`Sources/SmolPDFEngine`, C++) rewrites the PDF with [qpdf](https://github.com/qpdf/qpdf).
+Text, fonts and vector graphics are kept exactly as they are. For every image it makes several
+candidate encodings and keeps the smallest, including the original; lossless forms win when they
+are within 10% of a lossy one, since they stay sharp.
+
+| Candidate | When |
+| --- | --- |
+| Flate with PNG predictors chosen per row ([libdeflate](https://github.com/ebiggers/libdeflate)) | always |
+| Fewer bits per sample, a palette, or true grayscale | when that is exact (or, for gray, within JPEG noise in lossy profiles) |
+| JBIG2 (lossless generic region) and CCITT Group 4 | 1-bit images and masks |
+| The original JPEG with optimized Huffman tables and progressive scans | JPEGs (no pixel changes) |
+| JPEG at the profile's quality ([mozjpeg](https://github.com/mozilla/mozjpeg)) | photographic images, lossy profiles |
+| Downsampled to the profile's resolution | lossy profiles, images shown sharper than that |
+| 1-bit, thresholded | black-and-white scans, when enabled |
+
+The resolution of an image is how it is actually drawn: the engine follows the page content
+(including nested forms) to find the largest size each image is shown at. Black-and-white images
+are never downsampled: as 1-bit images they are smaller and sharper at full resolution.
+
+After the images, every other stream (page content, fonts, ...) is recompressed when that helps,
+identical streams (say, a font embedded once per page) are stored once, unused resources are
+dropped, and the file is written with object streams. Encryption is kept as it was.
+
+Grayscale also runs the system “Gray Tone” Quartz filter first, which converts vector graphics.
+Files qpdf can't read fall back to the Quartz filter alone (the mechanism behind Preview's
+“Reduce File Size”).
+
+Set `SMOL_DEBUG=1` to see every candidate considered for each image on stderr.
 
 Code layout:
 
 | Path | Contents |
 | --- | --- |
-| `Sources/SmolPDFCore` | Compression engine, profiles, output naming (no UI) |
+| `Sources/SmolPDFCore` | Compression API, profiles, output naming (no UI) |
+| `Sources/SmolPDFEngine` | The compression engine (C++ with a C interface) |
+| `Sources/CQPDF`, `CJPEG`, `CDeflate` | Vendored qpdf, mozjpeg and libdeflate (`scripts/vendor-deps.sh` updates them) |
 | `Sources/SmolPDFApp` | SwiftUI app |
 | `Sources/smolpdf` | Command-line tool |
 | `Tests/SmolPDFCoreTests` | Engine tests using generated PDFs |
@@ -64,7 +95,13 @@ Code layout:
 
 ## Known limitations
 
-- Grayscale images are still stored as three color channels (the system filter changes the tone,
-  not the color space), so grayscale saves less space than it could.
-- Images smaller than 128 px are left alone.
-- The Lossless profile only rewrites the file structure. It rarely helps and often keeps the original.
+- Fonts are not subsetted; a fully embedded font stays fully embedded.
+- JPEG 2000, JBIG2 and CCITT images already in a file are left as they are, and nothing is stored
+  as JPEG 2000. JBIG2 is lossless only (no symbol coding).
+- Grayscale goes through Quartz, which rewrites the document (as before) before the engine runs.
+- CMYK images are only re-encoded as JPEG when they were JPEGs already, to keep their colors exact.
+
+## Licenses
+
+smol-pdf bundles qpdf (Apache 2.0), mozjpeg (IJG and BSD-3-Clause) and libdeflate (MIT). Their
+license files are in their folders under `Sources/` and are copied into the app bundle.

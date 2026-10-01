@@ -18,7 +18,7 @@ let package = Package(
         .target(
             name: "CJPEG",
             exclude: ["fragments", "LICENSE.md", "README.ijg"],
-            cSettings: vendored + [.headerSearchPath("fragments")]
+            cSettings: vendored + [.headerSearchPath("."), .headerSearchPath("fragments")]
         ),
         // libdeflate: Flate compression that beats zlib.
         .target(
