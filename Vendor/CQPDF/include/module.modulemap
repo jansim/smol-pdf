@@ -1,0 +1,3 @@
+// qpdf's headers (Vendor/CQPDF/qpdf/include, added to dependents' search paths in Package.swift)
+// include fragments that are not self-contained, so they are used textually, not as a module.
+module CQPDF {}

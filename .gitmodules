@@ -1,0 +1,12 @@
+[submodule "Vendor/CQPDF/qpdf"]
+	path = Vendor/CQPDF/qpdf
+	url = https://github.com/qpdf/qpdf.git
+	shallow = true
+[submodule "Vendor/CJPEG/mozjpeg"]
+	path = Vendor/CJPEG/mozjpeg
+	url = https://github.com/mozilla/mozjpeg.git
+	shallow = true
+[submodule "Vendor/CDeflate/libdeflate"]
+	path = Vendor/CDeflate/libdeflate
+	url = https://github.com/ebiggers/libdeflate.git
+	shallow = true
