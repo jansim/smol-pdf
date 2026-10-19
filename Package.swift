@@ -52,9 +52,11 @@ let package = Package(
             dependencies: ["CJPEG"],
             path: "Vendor/CQPDF",
             exclude: [
-                // Other crypto providers, the command-line job layer, and a file #included by others.
+                // Other crypto providers, the command-line job layer, a file #included by others,
+                // and CMake inputs (config/qpdf/qpdf-config.h replaces the template).
                 "QPDFCrypto_gnutls.cc", "QPDFCrypto_openssl.cc", "QPDFJob.cc", "QPDFJob_argv.cc",
                 "QPDFJob_config.cc", "QPDFJob_json.cc", "qpdfjob-c.cc", "QPDFArgParser.cc", "sph/md_helper.c",
+                "CMakeLists.txt", "qpdf/qpdf-config.h.in",
             ].map { "qpdf/libqpdf/\($0)" },
             sources: ["qpdf/libqpdf"],
             cSettings: quiet + [.headerSearchPath("config"), .headerSearchPath("qpdf/include"), .headerSearchPath("qpdf/libqpdf")],
