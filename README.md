@@ -29,7 +29,9 @@ Earlier files are one click away in the history sidebar.
 
 ## Install
 
-smol-pdf needs macOS 14 or later, on Apple silicon or Intel.
+smol-pdf needs macOS 14 or later. Releases are built for Apple silicon (`macos-arm64`); some are
+universal (`macos-universal`) and also run on Intel Macs. Otherwise, on an Intel Mac,
+[build it from source](#build).
 
 ### With Homebrew
 
@@ -46,10 +48,10 @@ After that, `brew upgrade` updates smol-pdf along with everything else.
 
 ### By hand
 
-Download `smol-pdf-<version>-macos-universal.zip` from the
+Download `smol-pdf-<version>-<platform>.zip` from the
 [latest release](https://github.com/jansim/smol-pdf/releases/latest), unzip it and move smol-pdf to
 Applications. The command-line tool is inside the app (see [Command line](#command-line)). It is also
-in the release on its own, as `smol-pdf-<version>-macos-universal-cli.tar.gz`.
+in the release on its own, as `smol-pdf-<version>-<platform>-cli.tar.gz`.
 
 ### "Apple could not verify smol-pdf"
 
@@ -77,9 +79,10 @@ scripts/build-app.sh && open build/smol-pdf.app
 
 `ARCHS="arm64 x86_64" scripts/build-app.sh` builds universal binaries. Publishing a GitHub release
 (or running the Release workflow by hand with a draft's tag) attaches the zipped app and the
-command-line tool, built that way, to the release. Once it is the latest release, the workflow also
-updates the Homebrew cask (`Casks/smol-pdf.rb`; this repository is the tap) with a commit to the
-default branch. Release tags are `v` and the version, e.g. `v1.2`.
+command-line tool, built for Apple silicon, to the release; run by hand, it can build universal ones.
+Once it is the latest release, the workflow also updates the Homebrew cask (`Casks/smol-pdf.rb`; this
+repository is the tap) with a commit to the default branch. Release tags are `v` and the version,
+e.g. `v1.2`.
 
 For development, `swift run SmolPDFApp` starts the app without bundling, and `swift test` runs the
 engine tests.

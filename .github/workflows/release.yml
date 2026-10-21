@@ -1,7 +1,7 @@
 name: Release
 
-# Builds universal (Apple silicon + Intel) release binaries, attaches them to a release and points
-# the Homebrew cask at them.
+# Builds Apple silicon release binaries (or universal ones, when run by hand), attaches them to a
+# release and points the Homebrew cask at them.
 # GitHub sends no events for draft releases, so for a draft run this workflow by hand
 # (Actions > Release > Run workflow) with the draft's tag; publishing it runs it again.
 on:
@@ -12,6 +12,10 @@ on:
       tag:
         description: Tag of the (draft) release to attach the binaries to
         required: true
+      universal:
+        description: Also build for Intel (universal binaries)
+        type: boolean
+        default: false
 
 concurrency:
   group: release-${{ github.event.release.tag_name || inputs.tag }}
@@ -27,11 +31,14 @@ jobs:
 
     outputs:
       version: ${{ steps.ref.outputs.version }}
+      platform: ${{ steps.package.outputs.platform }}
       sha256: ${{ steps.package.outputs.sha256 }}
 
     env:
       GH_TOKEN: ${{ github.token }}
       TAG: ${{ github.event.release.tag_name || inputs.tag }}
+      ARCHS: ${{ inputs.universal && 'arm64 x86_64' || 'arm64' }}
+      PLATFORM: ${{ inputs.universal && 'macos-universal' || 'macos-arm64' }}
 
     steps:
       # A draft's tag doesn't exist until it is published: build the commit it targets instead.
@@ -56,7 +63,6 @@ jobs:
       - name: Build
         run: scripts/build-app.sh
         env:
-          ARCHS: arm64 x86_64
           VERSION: ${{ steps.ref.outputs.version }}
 
       - name: Smoke test
@@ -71,13 +77,14 @@ jobs:
       - name: Package
         id: package
         run: |
-          name="smol-pdf-${{ steps.ref.outputs.version }}-macos-universal"
+          name="smol-pdf-${{ steps.ref.outputs.version }}-$PLATFORM"
           mkdir -p dist "$RUNNER_TEMP/$name-cli"
           ditto -c -k --sequesterRsrc --keepParent build/smol-pdf.app "dist/$name.zip"
           cp build/smol-pdf.app/Contents/Resources/smolpdf "$RUNNER_TEMP/$name-cli/"
           cp -R build/smol-pdf.app/Contents/Resources/Licenses "$RUNNER_TEMP/$name-cli/"
           tar -czf "dist/$name-cli.tar.gz" -C "$RUNNER_TEMP" "$name-cli"
           (cd dist && shasum -a 256 * > SHA256SUMS.txt && cat SHA256SUMS.txt)
+          echo "platform=$PLATFORM" >> "$GITHUB_OUTPUT"
           echo "sha256=$(shasum -a 256 "dist/$name.zip" | cut -d ' ' -f 1)" >> "$GITHUB_OUTPUT"
 
       - name: Attach to release
@@ -94,6 +101,7 @@ jobs:
       GH_TOKEN: ${{ github.token }}
       TAG: ${{ github.event.release.tag_name || inputs.tag }}
       VERSION: ${{ needs.build.outputs.version }}
+      PLATFORM: ${{ needs.build.outputs.platform }}
       SHA256: ${{ needs.build.outputs.sha256 }}
 
     steps:
@@ -112,9 +120,14 @@ jobs:
       - name: Update the cask
         if: steps.latest.outputs.update == 'true'
         run: |
-          # The cask's download URL is .../download/v<version>/...
+          # The cask's download URL is .../download/v<version>/smol-pdf-<version>-<platform>.zip.
           [ "$TAG" = "v$VERSION" ] || { echo "::error::Tag releases as v$VERSION for the cask, not $TAG"; exit 1; }
-          sed -i -e "s/^  version \".*\"$/  version \"$VERSION\"/" -e "s/^  sha256 \".*\"$/  sha256 \"$SHA256\"/" Casks/smol-pdf.rb
+          sed -i -e "s/^  version \".*\"$/  version \"$VERSION\"/" -e "s/^  sha256 \".*\"$/  sha256 \"$SHA256\"/" \
+            -e "s/-macos-[a-z0-9]*\.zip\"$/-$PLATFORM.zip\"/" -e "/^  depends_on arch: :arm64$/d" Casks/smol-pdf.rb
+          # Apple silicon builds don't run on Intel Macs; universal ones do.
+          if [ "$PLATFORM" = macos-arm64 ]; then
+            sed -i "s/^  depends_on macos:/  depends_on arch: :arm64\n&/" Casks/smol-pdf.rb
+          fi
           git diff
           if git diff --quiet; then exit 0; fi
           git config user.name "github-actions[bot]"
