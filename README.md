@@ -36,6 +36,10 @@ git submodules, so clone with `--recursive` (or run `git submodule update --init
 scripts/build-app.sh && open build/smol-pdf.app
 ```
 
+`ARCHS="arm64 x86_64" scripts/build-app.sh` builds universal binaries. Publishing a GitHub release
+(or running the Release workflow by hand with a draft's tag) attaches the zipped app and the
+command-line tool, built that way, to the release.
+
 For development, `swift run SmolPDFApp` starts the app without bundling, and `swift test` runs the
 engine tests.
 
