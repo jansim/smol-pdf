@@ -4,6 +4,7 @@ A small native macOS app for shrinking PDF files, inspired by PDF Squeezer.
 
 Drop a PDF onto the window or the Dock icon, pick a compression profile and press **Compress**.
 The window shows the original next to the compressed file, with both sizes and how much was saved.
+Drop several files or a whole folder to compress them all at once.
 Earlier files are one click away in the history sidebar.
 
 ## Features
@@ -18,6 +19,11 @@ Earlier files are one click away in the history sidebar.
 - **Text stays text**: only images are re-encoded, so text stays sharp and searchable.
 - **Keeps the original** when compression wouldn't make the file smaller.
 - **Password-protected PDFs**: unlock them in the app; the result keeps the same password.
+- **Batches**: drop several files or folders onto the window or the Dock icon (folders are searched
+  recursively) and they're listed with what compressing each one saved.
+- **Fast**: images and other data are compressed on all cores, and a batch works on a few files at once.
+- **Progress**: see how far compression is, with the time remaining once a run will take longer than
+  10 seconds. Cancel it at any time; files not done yet stay as they were.
 - **Output**: next to the original with a suffix, into a folder, or replace the original
   (the original goes to the Trash).
 - **Before and after**: the original and the result side by side with their names and sizes.
@@ -77,6 +83,10 @@ The resolution of an image is how it is actually drawn: the engine follows the p
 (including nested forms) to find the largest size each image is shown at. Black-and-white images
 are never downsampled: as 1-bit images they are smaller and sharper at full resolution.
 
+Images, and then other streams, are processed on all cores: the work that needs qpdf's objects
+happens on one thread, the encoding on one worker thread per core, shared by all files being
+compressed (`SMOL_THREADS` sets their number). The result is the same whatever their number.
+
 After the images, every other stream (page content, fonts, ...) is recompressed when that helps,
 identical streams (say, a font embedded once per page) are stored once, unused resources are
 dropped, and the file is written with object streams. Encryption is kept as it was.
@@ -84,7 +94,8 @@ dropped, and the file is written with object streams. Encryption is kept as it w
 Grayscale converts images the same way, and rewrites the colors of text and vector graphics
 (color operators, color spaces, palettes and shadings) to their gray equivalents.
 
-Set `SMOL_DEBUG=1` to see every candidate considered for each image on stderr.
+Set `SMOL_DEBUG=1` to see every candidate considered for each image, and how long each step took, on
+stderr.
 
 Code layout:
 

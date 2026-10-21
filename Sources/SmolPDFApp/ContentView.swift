@@ -13,8 +13,11 @@ struct ContentView: View {
                 .navigationSplitViewColumnWidth(min: 250, ideal: 270, max: 380)
         } detail: {
             VStack(spacing: 0) {
-                if model.current == nil {
+                if model.items.isEmpty {
                     DropZoneView(isTargeted: isDropTargeted)
+                } else if model.isBatch {
+                    BatchView()
+                        .safeAreaInset(edge: .bottom, spacing: 0) { BottomBar() }
                 } else {
                     FilePairView()
                         .safeAreaInset(edge: .bottom, spacing: 0) { BottomBar() }
@@ -28,7 +31,7 @@ struct ContentView: View {
                 return true
             } isTargeted: { isDropTargeted = $0 }
             .overlay {
-                if isDropTargeted && model.current != nil {
+                if isDropTargeted && !model.items.isEmpty {
                     RoundedRectangle(cornerRadius: 10)
                         .strokeBorder(Color.accentColor, lineWidth: 3)
                         .padding(4)
@@ -40,14 +43,14 @@ struct ContentView: View {
                 Button { model.openPanel() } label: {
                     Label("Open File", systemImage: "plus")
                 }
-                .help("Open a PDF file")
+                .help("Open PDF files or folders")
                 // Without a title, this keeps the close button on the right.
                 Spacer()
                 Button { model.close() } label: {
-                    Label("Close File", systemImage: "xmark")
+                    Label("Close", systemImage: "xmark")
                 }
-                .help("Close the current file")
-                .disabled(model.current == nil || model.isCompressing)
+                .help(model.isBatch ? "Close these files" : "Close the current file")
+                .disabled(model.items.isEmpty || model.isCompressing)
             }
         }
         .inspector(isPresented: $showInspector) {
@@ -80,12 +83,12 @@ struct DropZoneView: View {
                 .foregroundStyle(isTargeted ? Color.accentColor : .secondary)
                 .symbolEffect(.bounce, value: isTargeted)
             VStack(spacing: 6) {
-                Text("Drop a PDF File Here")
+                Text("Drop PDF Files or Folders Here")
                     .font(.title2.weight(.semibold))
-                Text("It’s compressed with the “\(model.selectedProfile.name)” profile.")
+                Text("They’re compressed with the “\(model.selectedProfile.name)” profile.")
                     .foregroundStyle(.secondary)
             }
-            Button("Choose File…") { model.openPanel() }
+            Button("Choose Files…") { model.openPanel() }
                 .controlSize(.large)
             Text(model.settings.destinationSummary)
                 .font(.caption)
@@ -117,6 +120,16 @@ struct BottomBar: View {
     var body: some View {
         @Bindable var model = model
         HStack(spacing: 12) {
+            if model.isCompressing {
+                VStack(alignment: .leading, spacing: 3) {
+                    ProgressView(value: model.runProgress)
+                        .frame(width: 220)
+                    Text(progressText)
+                        .font(.caption.monospacedDigit())
+                        .foregroundStyle(.secondary)
+                }
+                .accessibilityElement(children: .combine)
+            }
             Spacer()
             Picker("Profile", selection: $model.selectedProfileID) {
                 ForEach(CompressionProfile.builtIns) { Text(model.displayName(of: $0)).tag($0.id) }
@@ -124,27 +137,39 @@ struct BottomBar: View {
             .labelsHidden()
             .fixedSize()
             .disabled(model.isCompressing)
-            Button {
-                model.compress()
-            } label: {
-                if model.isCompressing {
-                    HStack(spacing: 6) {
-                        ProgressView().controlSize(.small)
-                        Text("Compressing…")
-                    }
-                } else {
-                    Text(model.current?.isFinished == true ? "Compress Again" : "Compress")
+            if model.isCompressing {
+                Button(model.isCancelling ? "Cancelling…" : "Cancel") { model.cancel() }
+                    .frame(minWidth: 90)
+                    .disabled(model.isCancelling)
+                    .keyboardShortcut(.cancelAction)
+            } else {
+                Button {
+                    model.compress()
+                } label: {
+                    Text(compressTitle)
                         .frame(minWidth: 90)
                 }
+                .buttonStyle(.borderedProminent)
+                .disabled(!model.canCompress)
+                .keyboardShortcut(.defaultAction)
             }
-            .buttonStyle(.borderedProminent)
-            .disabled(!model.canCompress)
-            .keyboardShortcut(.defaultAction)
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 10)
         .background(.regularMaterial)
         .overlay(alignment: .top) { Divider() }
+    }
+
+    private var compressTitle: String {
+        guard model.isBatch else { return model.current?.isFinished == true ? "Compress Again" : "Compress" }
+        let count = model.compressibleCount
+        return count == 1 ? "Compress 1 File" : "Compress \(count) Files"
+    }
+
+    /// The time left once a run is projected to take a while, the percentage before.
+    private var progressText: String {
+        if let seconds = model.timeRemaining { return Format.timeRemaining(seconds) }
+        return "Compressing… \(Format.percent(model.runProgress))"
     }
 }
 
@@ -186,5 +211,17 @@ enum Format {
 
     static func percent(_ fraction: Double) -> String {
         fraction.formatted(.percent.precision(.fractionLength(0)))
+    }
+
+    /// "About 40 seconds remaining", rounded so that it doesn't change every moment.
+    static func timeRemaining(_ seconds: TimeInterval) -> String {
+        let rounded = seconds < 60 ? max(5, (seconds / 5).rounded(.up) * 5) : (seconds / 60).rounded() * 60
+        let formatter = DateComponentsFormatter()
+        formatter.unitsStyle = .full
+        formatter.allowedUnits = [.hour, .minute, .second]
+        formatter.maximumUnitCount = 2
+        formatter.includesApproximationPhrase = true
+        formatter.includesTimeRemainingPhrase = true
+        return formatter.string(from: rounded) ?? ""
     }
 }

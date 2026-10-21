@@ -135,8 +135,11 @@ struct FilePair: View {
     private var placeholder: some View {
         TileBox {
             switch item.status {
-            case .compressing:
+            case .waiting:
                 ProgressView()
+            case .compressing:
+                ProgressView(value: item.progress)
+                    .progressViewStyle(.circular)
             case .done:
                 Image(systemName: "checkmark.circle")
                     .font(.system(size: 32, weight: .light))
@@ -170,8 +173,10 @@ struct FilePair: View {
                     .foregroundStyle(.secondary)
             }
             .accessibilityElement(children: .combine)
-        case .compressing:
+        case .waiting:
             caption("Compressing…")
+        case .compressing:
+            caption("Compressing…", detail: Format.percent(item.progress))
         case .locked:
             VStack(spacing: 8) {
                 Image(systemName: "lock.fill")

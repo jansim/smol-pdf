@@ -24,6 +24,9 @@ struct SmolPDFApp: App {
                 Button("Compress") { model.compress() }
                     .keyboardShortcut(.return, modifiers: .command)
                     .disabled(!model.canCompress)
+                Button("Stop Compressing") { model.cancel() }
+                    .keyboardShortcut(".", modifiers: .command)
+                    .disabled(!model.isCompressing || model.isCancelling)
                 Divider()
                 Picker("Profile", selection: $model.selectedProfileID) {
                     ForEach(CompressionProfile.builtIns) { Text(model.displayName(of: $0)).tag($0.id) }
@@ -31,9 +34,9 @@ struct SmolPDFApp: App {
                 Button("Reset Profile") { model.resetProfile(model.selectedProfileID) }
                     .disabled(!model.isCustomized(model.selectedProfileID) || model.isCompressing)
                 Divider()
-                Button("Close File") { model.close() }
+                Button("Close") { model.close() }
                     .keyboardShortcut(.delete, modifiers: [.command, .shift])
-                    .disabled(model.current == nil || model.isCompressing)
+                    .disabled(model.items.isEmpty || model.isCompressing)
             }
         }
 

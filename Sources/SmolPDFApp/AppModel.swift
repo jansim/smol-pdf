@@ -9,6 +9,8 @@ final class PDFItem: Identifiable {
     enum Status: Equatable {
         case ready
         case locked
+        /// Queued in a run that has started.
+        case waiting
         case compressing
         case done(CompressionResult)
         case failed(String)
@@ -22,6 +24,8 @@ final class PDFItem: Identifiable {
     /// First page of the compressed file, once there is one.
     var compressedThumbnail: NSImage?
     var status: Status = .ready
+    /// Fraction done while compressing.
+    var progress = 0.0
     var password: String?
     /// The profile the current result was made with.
     var profileName: String?
@@ -59,8 +63,12 @@ final class PDFItem: Identifiable {
 final class AppModel {
     static let shared = AppModel()
 
-    /// The file shown in the window.
-    var current: PDFItem?
+    /// The files shown in the window.
+    var items: [PDFItem] = []
+    /// Whether they were added together and are shown as a list, rather than one file's before and after.
+    private(set) var isBatch = false
+    /// The file shown in the window, when it's just one.
+    var current: PDFItem? { isBatch ? nil : items.first }
     /// The history entry of the current file, highlighted in the sidebar.
     var selectedHistoryID: HistoryEntry.ID?
     /// User changes to built-in profiles, keyed by profile ID. Kept until the profile is reset.
@@ -71,12 +79,21 @@ final class AppModel {
         didSet { UserDefaults.standard.set(selectedProfileID.uuidString, forKey: Keys.selectedProfile) }
     }
     var isCompressing = false
+    var isCancelling = false
+    /// How far the current run is, from 0 to 1.
+    private(set) var runProgress = 0.0
+    /// Seconds the current run has left, when it's projected to take long enough to be worth showing.
+    private(set) var timeRemaining: TimeInterval?
     /// Item whose password is being asked for.
     var unlockItem: PDFItem?
     /// Item shown in the before/after comparison.
     var compareItem: PDFItem?
 
     let settings = AppSettings()
+
+    private var runTask: Task<Void, Never>?
+    private var runItems: [PDFItem] = []
+    private var runEstimate = TimeEstimate()
 
     private enum Keys {
         static let profiles = "profileOverrides"
@@ -85,6 +102,9 @@ final class AppModel {
     }
 
     private static let historyLimit = 200
+    /// Files compressed at once. Each uses all cores for its images, but files with few images mostly
+    /// use one, so a few at once keep the cores busy.
+    private static let concurrentFiles = max(1, min(3, ProcessInfo.processInfo.activeProcessorCount / 2))
 
     private init() {
         if let data = UserDefaults.standard.data(forKey: Keys.profiles),
@@ -149,10 +169,12 @@ final class AppModel {
 
     /// Shows a file from the history in the window.
     func showHistory(_ id: HistoryEntry.ID?) {
+        guard !isCompressing else { return }
         selectedHistoryID = id
         guard let id, let entry = history.first(where: { $0.id == id }) else { return }
         let item = PDFItem(entry: entry)
-        current = item
+        items = [item]
+        isBatch = false
         loadThumbnail(for: item, from: entry.result.originalURL)
         if !entry.keptOriginal { loadCompressedThumbnail(for: item, from: entry.outputURL) }
     }
@@ -172,42 +194,56 @@ final class AppModel {
 
     // MARK: Files
 
-    /// Opens the first PDF among `urls`, replacing the current file.
+    /// Opens the PDFs among `urls`, including those in folders, replacing what was shown. Several files are
+    /// shown as a list.
     func add(_ urls: [URL]) {
-        guard !isCompressing, let url = PDFFinder.pdfs(in: urls).first else { return }
-        let item = PDFItem(url: url)
-        current = item
+        guard !isCompressing else { return }
+        let files = PDFFinder.pdfs(in: urls)
+        guard !files.isEmpty else { return }
+        items = files.map(PDFItem.init(url:))
+        isBatch = files.count > 1
         selectedHistoryID = nil
-        loadDetails(for: item)
+        for item in items { loadDetails(for: item, thumbnail: !isBatch) }
         if settings.compressOnDrop { compress() }
     }
 
     func openPanel() {
         let panel = NSOpenPanel()
-        panel.allowedContentTypes = [.pdf]
-        panel.message = "Choose a PDF file to compress"
+        panel.allowedContentTypes = [.pdf, .folder]
+        panel.allowsMultipleSelection = true
+        panel.canChooseDirectories = true
+        panel.message = "Choose PDF files or folders to compress"
         panel.prompt = "Open"
         if panel.runModal() == .OK { add(panel.urls) }
     }
 
     func close() {
         guard !isCompressing else { return }
-        current = nil
+        items = []
+        isBatch = false
         selectedHistoryID = nil
     }
 
-    private func loadDetails(for item: PDFItem) {
+    /// Takes one file out of the list.
+    func remove(_ item: PDFItem) {
+        guard !isCompressing else { return }
+        items.removeAll { $0 === item }
+        if items.isEmpty { close() }
+    }
+
+    private func loadDetails(for item: PDFItem, thumbnail: Bool) {
         let url = item.url
         Task.detached(priority: .userInitiated) {
             let doc = PDFDocument(url: url)
+            let opened = doc != nil
             let locked = doc?.isLocked ?? false
             let pages = doc?.pageCount ?? 0
-            let thumb = locked ? nil : doc?.page(at: 0)?.thumbnail(of: Self.thumbnailSize, for: .cropBox)
+            let thumb = thumbnail && !locked ? doc?.page(at: 0)?.thumbnail(of: Self.thumbnailSize, for: .cropBox) : nil
             await MainActor.run {
                 item.pageCount = pages
-                item.thumbnail = thumb
+                if thumbnail { item.thumbnail = thumb }
                 guard item.status == .ready else { return }
-                if doc == nil {
+                if !opened {
                     item.status = .failed(CompressionError.cannotOpen.localizedDescription)
                 } else if locked {
                     item.status = .locked
@@ -244,61 +280,157 @@ final class AppModel {
         guard let doc = PDFDocument(url: item.url), doc.unlock(withPassword: password) else { return false }
         item.password = password
         item.pageCount = doc.pageCount
-        item.thumbnail = doc.page(at: 0)?.thumbnail(of: Self.thumbnailSize, for: .cropBox)
+        if !isBatch { item.thumbnail = doc.page(at: 0)?.thumbnail(of: Self.thumbnailSize, for: .cropBox) }
         item.status = .ready
         return true
     }
 
     // MARK: Compression
 
-    var canCompress: Bool {
-        guard !isCompressing, let current else { return false }
-        return current.status == .ready || current.isFinished
+    /// What a run compresses with, fixed when it starts.
+    private struct RunSettings: Sendable {
+        var profile: CompressionProfile
+        var profileName: String
+        var location: OutputLocation
+        var keepOriginal: Bool
     }
 
-    /// Compresses the current file, again if it was compressed already, e.g. with another profile.
-    func compress() {
-        guard canCompress, let item = current else { return }
-        if item.isFinished {
-            // After replacing the original, the item's file is now the compressed one.
-            if item.result?.outputURL == item.url, let thumbnail = item.compressedThumbnail {
-                item.thumbnail = thumbnail
-            }
-            item.compressedThumbnail = nil
-            item.originalSize = PDFCompressor.fileSize(item.url)
-        }
-        isCompressing = true
-        item.status = .compressing
-        let profile = selectedProfile
-        let profileName = displayName(of: profile)
-        let location = settings.outputLocation
-        let keepOriginal = settings.keepOriginalIfLarger
-        let url = item.url, password = item.password
+    var canCompress: Bool {
+        !isCompressing && items.contains { $0.status == .ready || $0.isFinished }
+    }
 
-        Task {
-            let outcome: Result<CompressionResult, Error> = await Task.detached(priority: .userInitiated) {
-                Result {
-                    try PDFCompressor.compress(
-                        input: url, output: location.destination(for: url), profile: profile,
-                        password: password, keepOriginalIfLarger: keepOriginal
-                    )
+    /// Files a run would compress: those not compressed yet, and again those that were (e.g. with another
+    /// profile). Locked files wait to be unlocked.
+    private var compressible: [PDFItem] {
+        items.filter { $0.status == .ready || $0.isFinished }
+    }
+
+    /// The number of files the Compress button compresses.
+    var compressibleCount: Int { compressible.count }
+
+    func compress() {
+        guard canCompress else { return }
+        let targets = compressible
+        for item in targets {
+            if item.isFinished {
+                // After replacing the original, the item's file is now the compressed one.
+                if item.result?.outputURL == item.url, let thumbnail = item.compressedThumbnail {
+                    item.thumbnail = thumbnail
                 }
-            }.value
-            switch outcome {
-            case .success(let result):
-                item.status = .done(result)
-                item.profileName = profileName
-                let entry = record(result, profileName: profileName)
-                if current === item { selectedHistoryID = entry.id }
-                if !result.keptOriginal { loadCompressedThumbnail(for: item, from: result.outputURL) }
-                if settings.revealWhenDone, !result.keptOriginal {
-                    NSWorkspace.shared.activateFileViewerSelecting([result.outputURL])
-                }
-            case .failure(let error):
-                item.status = .failed(error.localizedDescription)
+                item.compressedThumbnail = nil
+                item.originalSize = PDFCompressor.fileSize(item.url)
             }
-            isCompressing = false
-            if !NSApp.isActive { NSApp.requestUserAttention(.informationalRequest) }
+            item.status = .waiting
+            item.progress = 0
         }
+        let profile = selectedProfile
+        let settings = RunSettings(
+            profile: profile, profileName: displayName(of: profile),
+            location: self.settings.outputLocation, keepOriginal: self.settings.keepOriginalIfLarger
+        )
+        isCompressing = true
+        isCancelling = false
+        runItems = targets
+        runProgress = 0
+        timeRemaining = nil
+        runEstimate = TimeEstimate()
+        runTask = Task { await run(targets, settings) }
+    }
+
+    /// Stops the current run. Files not done yet stay as they were before it.
+    func cancel() {
+        guard isCompressing, !isCancelling else { return }
+        isCancelling = true
+        runTask?.cancel()
+    }
+
+    private func run(_ targets: [PDFItem], _ settings: RunSettings) async {
+        var outputs: [URL] = []
+        await withTaskGroup(of: URL?.self) { group in
+            var queue = targets.makeIterator()
+            for _ in 0..<Self.concurrentFiles {
+                guard let item = queue.next() else { break }
+                group.addTask { await self.compressOne(item, settings) }
+            }
+            while let output = await group.next() {
+                if let output { outputs.append(output) }
+                if !Task.isCancelled, let item = queue.next() {
+                    group.addTask { await self.compressOne(item, settings) }
+                }
+            }
+        }
+        for item in targets where item.status == .waiting || item.status == .compressing {
+            item.status = .ready
+            item.progress = 0
+        }
+        isCompressing = false
+        isCancelling = false
+        runTask = nil
+        runItems = []
+        timeRemaining = nil
+        if self.settings.revealWhenDone, !outputs.isEmpty {
+            NSWorkspace.shared.activateFileViewerSelecting(outputs)
+        }
+        if !NSApp.isActive { NSApp.requestUserAttention(.informationalRequest) }
+    }
+
+    /// Compresses one file of a run; returns the new file, if one was written.
+    private func compressOne(_ item: PDFItem, _ settings: RunSettings) async -> URL? {
+        guard !Task.isCancelled else { return nil }
+        item.status = .compressing
+        defer { updateRunProgress() }
+        do {
+            let result = try await Self.compressFile(item.url, password: item.password, settings) { fraction in
+                Task { @MainActor in
+                    guard item.status == .compressing else { return }
+                    item.progress = fraction
+                    self.updateRunProgress()
+                }
+            }
+            item.progress = 1
+            item.status = .done(result)
+            item.profileName = settings.profileName
+            let entry = record(result, profileName: settings.profileName)
+            if current === item { selectedHistoryID = entry.id }
+            if result.keptOriginal { return nil }
+            if !isBatch { loadCompressedThumbnail(for: item, from: result.outputURL) }
+            return result.outputURL
+        } catch CompressionError.cancelled {
+            item.status = .ready
+            item.progress = 0
+        } catch CompressionError.passwordRequired {
+            item.status = .locked
+        } catch {
+            item.status = .failed(error.localizedDescription)
+        }
+        return nil
+    }
+
+    /// Runs the engine off the main actor, in the calling task, so that cancelling the task stops it.
+    nonisolated private static func compressFile(
+        _ url: URL, password: String?, _ settings: RunSettings, progress: @escaping @Sendable (Double) -> Void
+    ) async throws -> CompressionResult {
+        try PDFCompressor.compress(
+            input: url, output: settings.location.destination(for: url), profile: settings.profile,
+            password: password, keepOriginalIfLarger: settings.keepOriginal, progress: progress
+        )
+    }
+
+    /// The run's progress, with each file weighed by its size.
+    private func updateRunProgress() {
+        guard isCompressing, !runItems.isEmpty else { return }
+        var total = 0.0, done = 0.0
+        for item in runItems {
+            let weight = Double(max(item.originalSize, 1))
+            total += weight
+            switch item.status {
+            case .compressing: done += weight * item.progress
+            case .done, .failed, .locked: done += weight
+            default: break
+            }
+        }
+        runProgress = done / total
+        runEstimate.update(fraction: runProgress)
+        timeRemaining = runEstimate.remaining
     }
 }
