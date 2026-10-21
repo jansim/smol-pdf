@@ -68,7 +68,7 @@ are within 10% of a lossy one, since they stay sharp.
 | Flate with PNG predictors chosen per row ([libdeflate](https://github.com/ebiggers/libdeflate)) | always |
 | Fewer bits per sample, a palette, or true grayscale | when that is exact (or, for gray, within JPEG noise in lossy profiles) |
 | JBIG2 (lossless generic region) and CCITT Group 4 | 1-bit images and masks |
-| The original JPEG with optimized Huffman tables and progressive scans | JPEGs (no pixel changes) |
+| The original JPEG with optimized Huffman tables and progressive scans | JPEGs (no pixel changes), also those wrapped in other filters such as ASCII85 |
 | JPEG at the profile's quality ([mozjpeg](https://github.com/mozilla/mozjpeg)) | photographic images, lossy profiles |
 | Downsampled to the profile's resolution | lossy profiles, images shown sharper than that |
 | 1-bit, thresholded | black-and-white scans, when enabled |

@@ -144,6 +144,9 @@ void recompressStreams(QPDF& pdf, SmolStats& stats) {
         if (dict.getKey("/Subtype").isNameAndEquals("/Image")) continue;
         // Cross-reference and object streams are rebuilt by the writer.
         if (dict.getKey("/Type").isNameAndEquals("/XRef") || dict.getKey("/Type").isNameAndEquals("/ObjStm")) continue;
+        // The writer stores the document's XMP metadata uncompressed, so that other tools can read
+        // it and PDF/A files stay valid.
+        if (obj.isRootMetadata()) continue;
         obj.setFilterOnWrite(false);
         if (hasLossyOrImageFilter(dict.getKey("/Filter"))) continue;
         try {

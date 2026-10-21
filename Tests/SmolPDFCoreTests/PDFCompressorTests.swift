@@ -234,6 +234,51 @@ final class PDFCompressorTests: XCTestCase {
         XCTAssertEqual(Set(PDFFinder.pdfs(in: [dir]).map(\.lastPathComponent)), ["a.pdf", "b.pdf"])
     }
 
+    func testLosslessKeepsColorKeyTransparency() throws {
+        // Black and white squares in 8-bit gray, the white ones transparent through a color key. With fewer
+        // bits per sample, the key's value 255 would no longer match them.
+        let pixels = Data((0..<(400 * 400)).map { i -> UInt8 in ((i % 400) / 40 + i / 400 / 40) % 2 == 0 ? 255 : 0 })
+        let input = try makeImagePDF(
+            named: "key.pdf", image: "/Width 400 /Height 400 /ColorSpace /DeviceGray /BitsPerComponent 8 /Mask [255 255]",
+            data: pixels
+        )
+        let output = dir.appendingPathComponent("out.pdf")
+        _ = try PDFCompressor.compress(input: input, output: output, profile: .lossless, keepOriginalIfLarger: false)
+        try assertSameRendering(input, output)
+    }
+
+    func testUnwrapsJPEGsInOtherFilters() throws {
+        // Some generators wrap JPEGs in text encodings (ReportLab writes [/ASCII85Decode /DCTDecode]).
+        let image = try makeImage(width: 800, height: 600)
+        let jpeg = try XCTUnwrap(NSBitmapImageRep(cgImage: image).representation(using: .jpeg, properties: [.compressionFactor: 0.9]))
+        let digits = Array("0123456789abcdef".utf8)
+        var hex = Data(capacity: jpeg.count * 2 + 1)
+        for byte in jpeg { hex.append(contentsOf: [digits[Int(byte >> 4)], digits[Int(byte & 15)]]) }
+        hex.append(UInt8(ascii: ">"))
+        let input = try makeImagePDF(
+            named: "hex.pdf",
+            image: "/Width 800 /Height 600 /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter [/ASCIIHexDecode /DCTDecode]",
+            data: hex
+        )
+        let output = dir.appendingPathComponent("out.pdf")
+        let result = try PDFCompressor.compress(input: input, output: output, profile: .lossless)
+        XCTAssertLessThan(result.compressedSize, result.originalSize * 6 / 10, "the JPEG is stored without its hex encoding")
+        try assertSameRendering(input, output)
+    }
+
+    func testKeepsXMPMetadataUncompressed() throws {
+        // Other tools (and PDF/A) expect the document's XMP metadata as plain text.
+        let xmp = Data(("<?xpacket begin=\"\" id=\"W5M0MpCehiHzreSzNTczkc9d\"?><x:xmpmeta xmlns:x=\"adobe:ns:meta/\"></x:xmpmeta>"
+            + String(repeating: " ", count: 2000) + "<?xpacket end=\"w\"?>").utf8)
+        let input = try makeImagePDF(
+            named: "xmp.pdf", image: "/Width 1 /Height 1 /ColorSpace /DeviceGray /BitsPerComponent 8", data: Data([0]),
+            catalog: "/Metadata 6 0 R", extraObjects: [stream("/Type /Metadata /Subtype /XML", xmp)]
+        )
+        let output = dir.appendingPathComponent("out.pdf")
+        _ = try PDFCompressor.compress(input: input, output: output, profile: .medium, keepOriginalIfLarger: false)
+        XCTAssertNotNil(try Data(contentsOf: output).range(of: Data("<x:xmpmeta".utf8)))
+    }
+
     // MARK: - Fixtures
 
     /// A two-page PDF with a large noisy photo-like image (unless another is given) and a line of real text.
@@ -263,6 +308,44 @@ final class PDFCompressorTests: XCTestCase {
         }
         ctx.closePDF()
         return url
+    }
+
+    /// A one-page PDF, written by hand, that draws an image XObject (its dictionary entries and data) over red.
+    /// Objects 1-5 are the catalog, pages, page, content and image; `extraObjects` are numbered from 6.
+    func makeImagePDF(
+        named name: String, image: String, data: Data, catalog: String = "", extraObjects: [Data] = []
+    ) throws -> URL {
+        let objects = [
+            Data("<< /Type /Catalog /Pages 2 0 R \(catalog) >>".utf8),
+            Data("<< /Type /Pages /Kids [3 0 R] /Count 1 >>".utf8),
+            Data("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 400 400] /Resources << /XObject << /Im0 5 0 R >> >> /Contents 4 0 R >>".utf8),
+            stream("", Data("1 0 0 rg 0 0 400 400 re f q 400 0 0 300 0 50 cm /Im0 Do Q".utf8)),
+            stream("/Type /XObject /Subtype /Image \(image)", data),
+        ] + extraObjects
+        var pdf = Data("%PDF-1.7\n".utf8)
+        var offsets: [Int] = []
+        for (index, object) in objects.enumerated() {
+            offsets.append(pdf.count)
+            pdf.append(Data("\(index + 1) 0 obj\n".utf8))
+            pdf.append(object)
+            pdf.append(Data("\nendobj\n".utf8))
+        }
+        let xref = pdf.count
+        var trailer = "xref\n0 \(objects.count + 1)\n0000000000 65535 f \n"
+        for offset in offsets { trailer += String(format: "%010ld 00000 n \n", offset) }
+        trailer += "trailer\n<< /Size \(objects.count + 1) /Root 1 0 R >>\nstartxref\n\(xref)\n%%EOF\n"
+        pdf.append(Data(trailer.utf8))
+        let url = dir.appendingPathComponent(name)
+        try pdf.write(to: url)
+        return url
+    }
+
+    /// A PDF stream object with these dictionary entries.
+    func stream(_ dictionary: String, _ data: Data) -> Data {
+        var stream = Data("<< \(dictionary) /Length \(data.count) >>\nstream\n".utf8)
+        stream.append(data)
+        stream.append(Data("\nendstream".utf8))
+        return stream
     }
 
     /// A noisy photo-like image, or with `flat`, a screenshot-like one with a few solid colors.

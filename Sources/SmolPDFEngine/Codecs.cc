@@ -1,4 +1,4 @@
-// Lossless encoders: Flate (libdeflate), PNG predictors and CCITT Group 4.
+// Lossless encoders: Flate (libdeflate), PNG predictors, CCITT Group 4 and JBIG2.
 
 #include "Engine.hh"
 
