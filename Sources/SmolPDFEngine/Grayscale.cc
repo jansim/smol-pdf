@@ -270,7 +270,7 @@ void convertToGray(QPDF& pdf, Progress& progress) {
     for (auto& page : QPDFPageDocumentHelper(pdf).getAllPages()) {
         contents.push_back({page.getObjectHandle(), true, colorSpacesOf(page.getAttribute("/Resources", false))});
     }
-    auto objects = reachableObjects(pdf);
+    auto objects = reachableObjects(pdf, &progress);
     for (auto& obj : objects) {
         QPDFObjectHandle dict = obj.isStream() ? obj.getDict() : obj;
         if (!dict.isDictionary()) continue;

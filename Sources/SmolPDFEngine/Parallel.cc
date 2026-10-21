@@ -136,10 +136,10 @@ void runTasks(std::function<std::unique_ptr<Task>()> const& next, Progress& prog
             if (!waiting) break;
             size_t need = waiting->memory();
             if (!running.empty() && workers.memory.load() + need > memory_budget) break;
-            workers.memory += need;
+            // Allocate everything before the hand-off, so that nothing can fail half-way: a task
+            // in `running` that never reaches a worker would be waited for forever.
             Task* raw = waiting.get();
-            running.push_back(std::move(waiting));
-            workers.post([raw, finished, &progress] {
+            std::function<void()> work = [raw, finished, &progress] {
                 bool failed = false;
                 try {
                     raw->run(progress);
@@ -147,9 +147,24 @@ void runTasks(std::function<std::unique_ptr<Task>()> const& next, Progress& prog
                     failed = true;
                 }
                 std::lock_guard<std::mutex> lock(finished->mutex);
-                finished->tasks.emplace_back(raw, failed);
+                finished->tasks.emplace_back(raw, failed); // never allocates: reserved below
                 finished->changed.notify_one();
-            });
+            };
+            running.reserve(running.size() + 1);
+            {
+                std::lock_guard<std::mutex> lock(finished->mutex);
+                finished->tasks.reserve(running.size() + 1);
+            }
+            running.push_back(std::move(waiting));
+            workers.memory += need;
+            try {
+                workers.post(std::move(work));
+            } catch (...) {
+                workers.memory -= need;
+                waiting = std::move(running.back());
+                running.pop_back();
+                throw;
+            }
         }
         if (running.empty()) break;
         auto [task, failed] = take(false);

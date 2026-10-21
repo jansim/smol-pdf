@@ -93,6 +93,10 @@ final class AppModel {
 
     private var runTask: Task<Void, Never>?
     private var runItems: [PDFItem] = []
+    /// Outputs of the current run that may still be being written, so that no two files get the same.
+    private var runOutputs: Set<URL> = []
+    /// Set when the app should quit once the current run has stopped.
+    private var quitAfterRun = false
     private var runEstimate = TimeEstimate()
 
     private enum Keys {
@@ -101,7 +105,7 @@ final class AppModel {
         static let history = "history"
     }
 
-    private static let historyLimit = 200
+    private static let historyLimit = 1000
     /// Files compressed at once. Each uses all cores for its images, but files with few images mostly
     /// use one, so a few at once keep the cores busy.
     private static let concurrentFiles = max(1, min(3, ProcessInfo.processInfo.activeProcessorCount / 2))
@@ -197,8 +201,15 @@ final class AppModel {
     /// Opens the PDFs among `urls`, including those in folders, replacing what was shown. Several files are
     /// shown as a list.
     func add(_ urls: [URL]) {
-        guard !isCompressing else { return }
-        let files = PDFFinder.pdfs(in: urls)
+        guard !isCompressing else { return NSSound.beep() }
+        // Files compressed earlier, when found in a folder: dropping the folder again shouldn't
+        // compress them once more. Files dropped on their own are taken as asked.
+        let given = Set(urls.map(\.standardizedFileURL.path))
+        let outputs = Set(history.filter { !$0.keptOriginal && $0.outputURL != $0.inputURL }.map(\.outputURL.standardizedFileURL.path))
+        let files = PDFFinder.pdfs(in: urls).filter {
+            let path = $0.standardizedFileURL.path
+            return given.contains(path) || !outputs.contains(path)
+        }
         guard !files.isEmpty else { return }
         items = files.map(PDFItem.init(url:))
         isBatch = files.count > 1
@@ -296,14 +307,23 @@ final class AppModel {
     }
 
     var canCompress: Bool {
-        !isCompressing && items.contains { $0.status == .ready || $0.isFinished }
+        !isCompressing && !compressible.isEmpty
     }
 
-    /// Files a run would compress: those not compressed yet, and again those that were (e.g. with another
-    /// profile). Locked files wait to be unlocked.
+    /// Files a run would compress: those not compressed yet (or that failed), or once all are done, all
+    /// again (e.g. with another profile). Locked files wait to be unlocked.
     private var compressible: [PDFItem] {
-        items.filter { $0.status == .ready || $0.isFinished }
+        let unfinished = items.filter { item in
+            switch item.status {
+            case .ready, .failed: true
+            default: false
+            }
+        }
+        return unfinished.isEmpty ? items.filter(\.isFinished) : unfinished
     }
+
+    /// Whether the Compress button compresses files again.
+    var compressesAgain: Bool { compressible.allSatisfy(\.isFinished) && compressible.contains { $0.result != nil } }
 
     /// The number of files the Compress button compresses.
     var compressibleCount: Int { compressible.count }
@@ -331,6 +351,7 @@ final class AppModel {
         isCompressing = true
         isCancelling = false
         runItems = targets
+        runOutputs = []
         runProgress = 0
         timeRemaining = nil
         runEstimate = TimeEstimate()
@@ -368,10 +389,41 @@ final class AppModel {
         runTask = nil
         runItems = []
         timeRemaining = nil
-        if self.settings.revealWhenDone, !outputs.isEmpty {
-            NSWorkspace.shared.activateFileViewerSelecting(outputs)
+        runOutputs = []
+        if self.settings.revealWhenDone, !outputs.isEmpty { reveal(outputs) }
+        if quitAfterRun {
+            NSApp.reply(toApplicationShouldTerminate: true)
+            return
         }
         if !NSApp.isActive { NSApp.requestUserAttention(.informationalRequest) }
+    }
+
+    /// Selects the new files in the Finder: in one window, or when they are spread over several folders,
+    /// their common folder.
+    private func reveal(_ files: [URL]) {
+        let folders = Set(files.map { $0.deletingLastPathComponent().standardizedFileURL })
+        guard folders.count > 1, var common = folders.first?.pathComponents else {
+            return NSWorkspace.shared.activateFileViewerSelecting(files)
+        }
+        for folder in folders {
+            let parts = folder.pathComponents
+            common = Array(zip(common, parts).prefix { $0 == $1 }.map(\.0))
+        }
+        NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: NSString.path(withComponents: common))])
+    }
+
+    /// Asks whether to stop a run when the app is about to quit; quits once it has stopped.
+    func shouldTerminate() -> NSApplication.TerminateReply {
+        guard isCompressing else { return .terminateNow }
+        let alert = NSAlert()
+        alert.messageText = "Stop compressing and quit?"
+        alert.informativeText = "Files that aren’t done yet stay as they are."
+        alert.addButton(withTitle: "Quit")
+        alert.addButton(withTitle: "Cancel")
+        guard alert.runModal() == .alertFirstButtonReturn else { return .terminateCancel }
+        quitAfterRun = true
+        cancel()
+        return .terminateLater
     }
 
     /// Compresses one file of a run; returns the new file, if one was written.
@@ -379,8 +431,11 @@ final class AppModel {
         guard !Task.isCancelled else { return nil }
         item.status = .compressing
         defer { updateRunProgress() }
+        // Chosen here, one file at a time, so that files compressed at once never pick the same.
+        let output = settings.location.destination(for: item.url, excluding: runOutputs)
+        runOutputs.insert(output)
         do {
-            let result = try await Self.compressFile(item.url, password: item.password, settings) { fraction in
+            let result = try await Self.compressFile(item.url, to: output, password: item.password, settings) { fraction in
                 Task { @MainActor in
                     guard item.status == .compressing else { return }
                     item.progress = fraction
@@ -408,10 +463,11 @@ final class AppModel {
 
     /// Runs the engine off the main actor, in the calling task, so that cancelling the task stops it.
     nonisolated private static func compressFile(
-        _ url: URL, password: String?, _ settings: RunSettings, progress: @escaping @Sendable (Double) -> Void
+        _ url: URL, to output: URL, password: String?, _ settings: RunSettings,
+        progress: @escaping @Sendable (Double) -> Void
     ) async throws -> CompressionResult {
         try PDFCompressor.compress(
-            input: url, output: settings.location.destination(for: url), profile: settings.profile,
+            input: url, output: output, profile: settings.profile,
             password: password, keepOriginalIfLarger: settings.keepOriginal, progress: progress
         )
     }

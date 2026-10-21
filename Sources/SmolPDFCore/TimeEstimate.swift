@@ -11,6 +11,8 @@ public struct TimeEstimate: Sendable {
 
     private var smoothed: TimeInterval?
     private var updated: Date?
+    /// Since when the run has been projected to take longer than `threshold`.
+    private var longSince: Date?
 
     public init(start: Date = .now, threshold: TimeInterval = 10) {
         self.start = start
@@ -34,7 +36,14 @@ public struct TimeEstimate: Sendable {
         }
         smoothed = estimate
         updated = now
-        if remaining != nil || elapsed + left > threshold {
+        // A single lumpy step can project a long run early on: show the estimate only once the run
+        // has looked long for a couple of seconds.
+        if elapsed + estimate > threshold {
+            longSince = longSince ?? now
+        } else {
+            longSince = nil
+        }
+        if remaining != nil || longSince.map({ now.timeIntervalSince($0) >= 2 }) == true {
             remaining = max(0, estimate)
         }
     }

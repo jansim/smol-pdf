@@ -77,6 +77,8 @@ struct FileHistorySidebar: View {
         .onDeleteCommand {
             if let id = model.selectedHistoryID { model.removeHistory([id]) }
         }
+        // The window shows the files being compressed until the run ends.
+        .disabled(model.isCompressing)
         .safeAreaInset(edge: .bottom, spacing: 0) {
             HStack {
                 Spacer()

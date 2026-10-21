@@ -940,7 +940,7 @@ uint64_t imageCost(QPDFObjectHandle image, SmolOptions const& options) {
 
 void optimizeImages(QPDF& pdf, SmolOptions const& options, SmolStats& stats, Progress& progress) {
     std::vector<QPDFObjectHandle> images;
-    for (auto& obj : reachableObjects(pdf)) {
+    for (auto& obj : reachableObjects(pdf, &progress)) {
         if (obj.isStream() && obj.getDict().getKey("/Subtype").isNameAndEquals("/Image")) images.push_back(obj);
     }
     stats.images = long(images.size());

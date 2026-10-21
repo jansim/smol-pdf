@@ -88,8 +88,8 @@ void runTasks(std::function<std::unique_ptr<Task>()> const& next, Progress& prog
 // Engine.cc ---------------------------------------------------------------------------------------
 
 // Indirect objects reachable from the trailer: what will be written. (QPDF::getAllObjects also
-// returns objects that are no longer referenced.)
-std::vector<QPDFObjectHandle> reachableObjects(QPDF& pdf);
+// returns objects that are no longer referenced.) With `progress`, lets the caller cancel meanwhile.
+std::vector<QPDFObjectHandle> reachableObjects(QPDF& pdf, Progress* progress = nullptr);
 
 // Estimated cost of decoding a stream's raw data and compressing it again.
 uint64_t streamCost(QPDFObjectHandle stream);

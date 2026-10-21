@@ -223,6 +223,9 @@ final class PDFCompressorTests: XCTestCase {
         XCTAssertEqual(OutputLocation.default.destination(for: input).lastPathComponent, "report-compressed 2.pdf")
         XCTAssertEqual(OutputLocation.replaceOriginal.destination(for: input), input)
         XCTAssertEqual(OutputLocation.folder(dir).destination(for: input).lastPathComponent, "report-compressed 2.pdf")
+        let taken: Set<URL> = [dir.appendingPathComponent("report-compressed 2.pdf")]
+        XCTAssertEqual(OutputLocation.default.destination(for: input, excluding: taken).lastPathComponent, "report-compressed 3.pdf",
+                       "a name another file of the batch is about to write is taken too")
     }
 
     func testFinderExpandsFolders() throws {
@@ -272,13 +275,21 @@ final class PDFCompressorTests: XCTestCase {
         short.update(fraction: 0.9, at: start + 3)
         XCTAssertNil(short.remaining, "runs projected to take less than 10 seconds show no estimate")
 
+        var spike = TimeEstimate(start: start)
+        spike.update(fraction: 0.08, at: start + 2)
+        spike.update(fraction: 0.5, at: start + 3)
+        spike.update(fraction: 0.9, at: start + 5)
+        XCTAssertNil(spike.remaining, "one slow-looking moment early on doesn't count")
+
         var long = TimeEstimate(start: start)
         long.update(fraction: 0.1, at: start + 0.5)
         XCTAssertNil(long.remaining, "too early to tell")
         long.update(fraction: 0.1, at: start + 2)
-        XCTAssertEqual(long.remaining ?? 0, 18, accuracy: 0.01)
-        long.update(fraction: 0.3, at: start + 2.1)
-        XCTAssertGreaterThan(long.remaining ?? 0, 15, "a jump in progress moves the estimate gradually")
+        XCTAssertNil(long.remaining, "long for a moment only")
+        long.update(fraction: 0.2, at: start + 4)
+        XCTAssertEqual(long.remaining ?? 0, 16, accuracy: 0.5)
+        long.update(fraction: 0.5, at: start + 4.1)
+        XCTAssertGreaterThan(long.remaining ?? 0, 14, "a jump in progress moves the estimate gradually")
         long.update(fraction: 0.9, at: start + 18)
         XCTAssertEqual(long.remaining ?? 0, 2, accuracy: 0.5)
         long.update(fraction: 0.95, at: start + 18.5)

@@ -13,12 +13,13 @@
 #include <cstdlib>
 #include <cstring>
 #include <functional>
+#include <mutex>
 #include <unordered_map>
 #include <vector>
 
 namespace smol {
 
-std::vector<QPDFObjectHandle> reachableObjects(QPDF& pdf) {
+std::vector<QPDFObjectHandle> reachableObjects(QPDF& pdf, Progress* progress) {
     std::vector<QPDFObjectHandle> found;
     std::set<QPDFObjGen> seen;
     std::vector<QPDFObjectHandle> todo{pdf.getTrailer()};
@@ -29,6 +30,8 @@ std::vector<QPDFObjectHandle> reachableObjects(QPDF& pdf) {
             if (item.isIndirect()) {
                 if (seen.insert(item.getObjGen()).second && !item.isNull()) {
                     found.push_back(item);
+                    // Large files take a while to resolve: let the caller cancel meanwhile.
+                    if (progress && found.size() % 4096 == 0) progress->report();
                     todo.push_back(item);
                 }
             } else if (item.isArray() || item.isDictionary()) {
@@ -69,7 +72,7 @@ bool isJavaScriptAction(QPDFObjectHandle action) {
 
 // Removes what the options ask for. Everything removed here is simply no longer referenced, and
 // QPDFWriter only writes objects that are still reachable.
-void removeContent(QPDF& pdf, SmolOptions const& o) {
+void removeContent(QPDF& pdf, SmolOptions const& o, Progress& progress) {
     QPDFObjectHandle root = pdf.getRoot();
     QPDFObjectHandle names = root.getKey("/Names");
 
@@ -112,7 +115,7 @@ void removeContent(QPDF& pdf, SmolOptions const& o) {
     }
 
     if (o.remove_metadata || o.remove_editing_data || o.remove_javascript || o.remove_attachments) {
-        for (auto& obj : reachableObjects(pdf)) {
+        for (auto& obj : reachableObjects(pdf, &progress)) {
             QPDFObjectHandle dict = dictOf(obj);
             if (dict.isNull()) continue;
             if (o.remove_metadata) dict.removeKey("/Metadata");
@@ -197,7 +200,7 @@ class Recompression: public Task {
 // Recompresses every stream other than images (content, fonts, ...) with libdeflate, keeping the
 // original when that isn't smaller.
 void recompressStreams(QPDF& pdf, SmolStats& stats, Progress& progress) {
-    auto objects = reachableObjects(pdf);
+    auto objects = reachableObjects(pdf, &progress);
     size_t next = 0;
     runTasks(
         [&]() -> std::unique_ptr<Task> {
@@ -249,10 +252,12 @@ void replaceReferences(QPDFObjectHandle obj, std::map<QPDFObjGen, QPDFObjectHand
 
 // Makes identical streams (same dictionary and data) share one object: fonts embedded once per
 // page, the same logo on every page, ...
-void mergeDuplicateStreams(QPDF& pdf, SmolStats& stats) {
+void mergeDuplicateStreams(QPDF& pdf, SmolStats& stats, Progress& progress) {
     std::unordered_map<std::string, std::vector<QPDFObjectHandle>> by_key;
     std::map<QPDFObjGen, QPDFObjectHandle> replacements;
-    for (auto& obj : reachableObjects(pdf)) {
+    size_t visited = 0;
+    for (auto& obj : reachableObjects(pdf, &progress)) {
+        if (++visited % 1024 == 0) progress.report();
         if (!obj.isStream()) continue;
         QPDFObjectHandle dict = obj.getDict();
         if (dict.getKey("/Type").isNameAndEquals("/XRef") || dict.getKey("/Type").isNameAndEquals("/ObjStm")) continue;
@@ -282,14 +287,15 @@ void mergeDuplicateStreams(QPDF& pdf, SmolStats& stats) {
     }
     if (replacements.empty()) return;
     stats.duplicates_removed += long(replacements.size());
-    for (auto& obj : reachableObjects(pdf)) replaceReferences(obj, replacements, 0);
+    for (auto& obj : reachableObjects(pdf, &progress)) replaceReferences(obj, replacements, 0);
     replaceReferences(pdf.getTrailer(), replacements, 0);
 }
 
 // Tells `progress` about all the work ahead, so that it moves evenly; returns the part that is
-// writing the file.
+// writing the file. Called once the pages are tidied and duplicates merged, so that it counts what
+// will actually be processed.
 uint64_t plan(QPDF& pdf, std::vector<QPDFPageObjectHelper>& pages, SmolOptions const& o, Progress& progress) {
-    auto objects = reachableObjects(pdf);
+    auto objects = reachableObjects(pdf, &progress);
     uint64_t write = objects.size() * 1000, work = 0;
     bool images = false;
     for (auto& obj : objects) {
@@ -304,11 +310,11 @@ uint64_t plan(QPDF& pdf, std::vector<QPDFPageObjectHelper>& pages, SmolOptions c
             work += streamCost(obj);
         }
     }
-    // Page content is parsed to externalise inline images, to drop unused resources, to find image
-    // resolutions (only needed for downsampling) and to convert colours.
+    // Page content is parsed again to find image resolutions (only needed for downsampling) and to
+    // convert colours.
     uint64_t content = 0;
     for (auto& page : pages) content += contentCost(page.getObjectHandle());
-    work += content * (2 + (o.lossy_images && images ? 1 : 0) + (o.grayscale ? 1 : 0));
+    work += content * ((o.lossy_images && images ? 1 : 0) + (o.grayscale ? 1 : 0));
     progress.expect(work + write);
     return write;
 }
@@ -373,34 +379,32 @@ extern "C" SmolStatus smol_compress(
     uint64_t write_cost = 0;
     try {
         progress.report(true);
-        removeContent(pdf, opts);
+        removeContent(pdf, opts, progress);
         std::vector<QPDFPageObjectHelper> pages = QPDFPageDocumentHelper(pdf).getAllPages();
-        write_cost = plan(pdf, pages, opts, progress);
-        step("remove and plan");
+        step("remove");
+        // Before planning, since this changes what there is to do. It is quick, so the fraction
+        // stays at 0 meanwhile.
         for (auto& page : pages) {
-            uint64_t cost = contentCost(page.getObjectHandle());
             // Larger inline images become image objects so they can be optimised too.
             // With grayscale all of them, so none keeps its colours.
             try {
                 page.externalizeInlineImages(opts.grayscale ? 0 : 4096);
             } catch (std::exception&) {
             }
-            progress.advance(cost);
             progress.report();
         }
         for (auto& page : pages) {
-            uint64_t cost = contentCost(page.getObjectHandle());
             try {
                 page.removeUnreferencedResources();
             } catch (std::exception&) {
             }
-            progress.advance(cost);
             progress.report();
         }
         step("tidy pages");
-        mergeDuplicateStreams(pdf, stats); // before images, so each is processed once
-        progress.report();
+        mergeDuplicateStreams(pdf, stats, progress); // before images, so each is processed once
         step("merge duplicates");
+        write_cost = plan(pdf, pages, opts, progress);
+        step("plan");
         optimizeImages(pdf, opts, stats, progress);
         step("images");
         if (opts.grayscale) {
@@ -409,7 +413,7 @@ extern "C" SmolStatus smol_compress(
         }
         recompressStreams(pdf, stats, progress);
         step("streams");
-        mergeDuplicateStreams(pdf, stats); // images that became identical
+        mergeDuplicateStreams(pdf, stats, progress); // images that became identical
         progress.report();
         step("merge duplicates");
     } catch (Cancelled&) {
@@ -429,7 +433,9 @@ extern "C" SmolStatus smol_compress(
         }
         trailer.replaceKey("/Size", QPDFObjectHandle::newInteger(0));
 
-        Pl_Flate::setCompressionLevel(9);
+        // A global in qpdf: set it once, as calls on several threads would race.
+        static std::once_flag flate_level;
+        std::call_once(flate_level, [] { Pl_Flate::setCompressionLevel(9); });
         QPDFWriter writer(pdf, output);
         writer.setObjectStreamMode(qpdf_o_generate);
         writer.setCompressStreams(true);

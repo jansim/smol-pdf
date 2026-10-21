@@ -27,9 +27,11 @@ struct ContentView: View {
             .background(TranslucentBackground().ignoresSafeArea())
             .navigationSplitViewColumnWidth(min: 400, ideal: 560)
             .dropDestination(for: URL.self) { urls, _ in
+                // Nothing can be added during a run.
+                guard !model.isCompressing else { return false }
                 model.add(urls)
                 return true
-            } isTargeted: { isDropTargeted = $0 }
+            } isTargeted: { isDropTargeted = $0 && !model.isCompressing }
             .overlay {
                 if isDropTargeted && !model.items.isEmpty {
                     RoundedRectangle(cornerRadius: 10)
@@ -163,7 +165,8 @@ struct BottomBar: View {
     private var compressTitle: String {
         guard model.isBatch else { return model.current?.isFinished == true ? "Compress Again" : "Compress" }
         let count = model.compressibleCount
-        return count == 1 ? "Compress 1 File" : "Compress \(count) Files"
+        let files = count == 1 ? "1 File" : "\(count) Files"
+        return model.compressesAgain ? "Compress \(files) Again" : "Compress \(files)"
     }
 
     /// The time left once a run is projected to take a while, the percentage before.
