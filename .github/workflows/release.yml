@@ -1,0 +1,77 @@
+name: Release
+
+# Builds universal (Apple silicon + Intel) release binaries and attaches them to a release.
+# GitHub sends no events for draft releases, so for a draft run this workflow by hand
+# (Actions > Release > Run workflow) with the draft's tag; publishing it runs it again.
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Tag of the (draft) release to attach the binaries to
+        required: true
+
+concurrency:
+  group: release-${{ github.event.release.tag_name || inputs.tag }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: macos-26
+    timeout-minutes: 60
+
+    env:
+      GH_TOKEN: ${{ github.token }}
+      TAG: ${{ github.event.release.tag_name || inputs.tag }}
+
+    steps:
+      # A draft's tag doesn't exist until it is published: build the commit it targets instead.
+      - name: Resolve commit
+        id: ref
+        run: |
+          if gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$TAG" --silent 2>/dev/null; then
+            echo "ref=refs/tags/$TAG" >> "$GITHUB_OUTPUT"
+          else
+            echo "ref=$(gh release view "$TAG" -R "$GITHUB_REPOSITORY" --json targetCommitish -q .targetCommitish)" >> "$GITHUB_OUTPUT"
+          fi
+          echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.ref.outputs.ref }}
+          submodules: true
+
+      - name: Toolchain
+        run: swift --version && xcodebuild -version
+
+      - name: Build
+        run: scripts/build-app.sh
+        env:
+          ARCHS: arm64 x86_64
+          VERSION: ${{ steps.ref.outputs.version }}
+
+      - name: Smoke test
+        run: |
+          lipo -archs build/smol-pdf.app/Contents/MacOS/SmolPDFApp
+          lipo -archs build/bin/smolpdf
+          codesign --verify --strict build/smol-pdf.app
+          build/bin/smolpdf --help
+          build/bin/smolpdf -v -p maximum -x all -o "$RUNNER_TEMP/maximum" test-document.pdf
+          build/bin/smolpdf -v -p lossless -o "$RUNNER_TEMP/lossless" test-document.pdf
+
+      - name: Package
+        run: |
+          name="smol-pdf-${{ steps.ref.outputs.version }}-macos-universal"
+          mkdir -p dist "$RUNNER_TEMP/$name-cli"
+          ditto -c -k --sequesterRsrc --keepParent build/smol-pdf.app "dist/$name.zip"
+          cp build/smol-pdf.app/Contents/Resources/smolpdf "$RUNNER_TEMP/$name-cli/"
+          cp -R build/smol-pdf.app/Contents/Resources/Licenses "$RUNNER_TEMP/$name-cli/"
+          tar -czf "dist/$name-cli.tar.gz" -C "$RUNNER_TEMP" "$name-cli"
+          (cd dist && shasum -a 256 * > SHA256SUMS.txt && cat SHA256SUMS.txt)
+
+      - name: Attach to release
+        run: gh release upload "$TAG" dist/* --clobber -R "$GITHUB_REPOSITORY"
