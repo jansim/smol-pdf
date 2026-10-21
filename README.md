@@ -27,6 +27,47 @@ Earlier files are one click away in the history sidebar.
 - **Compare**: before and after side by side, with scrolling and zoom kept in sync.
 - **Command-line tool** `smolpdf` with the same engine, for batches and folders.
 
+## Install
+
+smol-pdf needs macOS 14 or later. Releases are built for Apple silicon (`macos-arm64`); some are
+universal (`macos-universal`) and also run on Intel Macs. Otherwise, on an Intel Mac,
+[build it from source](#build).
+
+### With Homebrew
+
+```sh
+brew tap jansim/smol-pdf https://github.com/jansim/smol-pdf
+brew install --cask jansim/smol-pdf/smol-pdf
+```
+
+This puts smol-pdf in Applications and the command-line tool `smolpdf` on your `PATH`. Use the full
+name `jansim/smol-pdf/smol-pdf` the first time: installing a cask by its full name is how you tell
+Homebrew to trust it. Homebrew 6 and later won't load casks from other taps until you trust them.
+After that, `brew upgrade` updates smol-pdf along with everything else.
+`brew uninstall --cask --zap smol-pdf` removes it, including its settings and history.
+
+### By hand
+
+Download `smol-pdf-<version>-<platform>.zip` from the
+[latest release](https://github.com/jansim/smol-pdf/releases/latest), unzip it and move smol-pdf to
+Applications. The command-line tool is inside the app (see [Command line](#command-line)). It is also
+in the release on its own, as `smol-pdf-<version>-<platform>-cli.tar.gz`.
+
+### "Apple could not verify smol-pdf"
+
+Apple only notarizes apps for members of its paid developer program, so smol-pdf is signed ad hoc
+and not notarized. When you download it with a browser, macOS refuses to open it the first time.
+To open it anyway:
+
+- Try to open it once. Then go to **System Settings → Privacy & Security**, click **Open Anyway** next
+  to the message about smol-pdf, and confirm. Or:
+- Remove the quarantine flag that the browser put on the download:
+  `xattr -dr com.apple.quarantine /Applications/smol-pdf.app` (and
+  `xattr -d com.apple.quarantine smolpdf` for the separate command-line tool).
+
+The Homebrew cask removes the quarantine flag for you after installing. If you would rather not
+trust a prebuilt app, build it from source.
+
 ## Build
 
 Requires macOS 14 or later and Xcode 16 or later (Swift 6 toolchain). The C/C++ libraries are
@@ -39,6 +80,9 @@ scripts/build-app.sh && open build/smol-pdf.app
 `ARCHS="arm64 x86_64" scripts/build-app.sh` builds universal binaries. Publishing a GitHub release
 (or running the Release workflow by hand with a draft's tag) attaches the zipped app and the
 command-line tool, built for Apple silicon, to the release; run by hand, it can build universal ones.
+Once it is the latest release, the workflow also updates the Homebrew cask (`Casks/smol-pdf.rb`; this
+repository is the tap) with a commit to the default branch. Release tags are `v` and the version,
+e.g. `v1.2`.
 
 For development, `swift run SmolPDFApp` starts the app without bundling, and `swift test` runs the
 engine tests.
@@ -50,7 +94,8 @@ file lists against the library's own build files.
 
 ## Command line
 
-The CLI is bundled at `smol-pdf.app/Contents/Resources/smolpdf` (or `swift run smolpdf …`):
+The Homebrew cask puts `smolpdf` on your `PATH`. Otherwise it is at
+`/Applications/smol-pdf.app/Contents/Resources/smolpdf` (or use `swift run smolpdf …` in a checkout):
 
 ```sh
 smolpdf -p high ~/Documents/scans          # a folder, recursively
@@ -101,6 +146,7 @@ Code layout:
 | `Sources/smolpdf` | Command-line tool |
 | `Tests/SmolPDFCoreTests` | Engine tests using generated PDFs |
 | `scripts/` | App bundling and icon generation |
+| `Casks/` | Homebrew cask (this repository is also the tap) |
 
 ## Known limitations
 
