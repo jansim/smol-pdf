@@ -1,0 +1,53 @@
+name: Homebrew cask
+
+# Installs the cask from this checkout (so the release it points at), the way people install it,
+# and checks that the app and the command-line tool come out of quarantine and run.
+on:
+  push:
+    branches: ["**"]
+    paths: ["Casks/**", ".github/workflows/cask.yml"]
+  pull_request:
+    paths: ["Casks/**", ".github/workflows/cask.yml"]
+  workflow_dispatch:
+
+jobs:
+  install:
+    # Same-repo branches already run on push; only fork PRs need this event.
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository
+
+    runs-on: macos-26
+    timeout-minutes: 20
+
+    env:
+      HOMEBREW_NO_AUTO_UPDATE: "1"
+      HOMEBREW_NO_INSTALL_CLEANUP: "1"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # As in the README, with this checkout as the tap. Installing by full name trusts the cask.
+      - name: Install
+        run: |
+          brew --version
+          brew tap jansim/smol-pdf "$GITHUB_WORKSPACE"
+          brew install --cask jansim/smol-pdf/smol-pdf
+
+      - name: Lint
+        run: |
+          brew style --cask jansim/smol-pdf/smol-pdf
+          brew audit --cask --strict --online jansim/smol-pdf/smol-pdf
+
+      - name: Check
+        run: |
+          echo "Download: $(xattr -p com.apple.quarantine "$(brew --cache --cask smol-pdf)" 2>&1)"
+          if xattr -r /Applications/smol-pdf.app | grep com.apple.quarantine; then
+            echo "::error::The app is still quarantined"
+            exit 1
+          fi
+          smolpdf --help
+          smolpdf -v -p high -o "$RUNNER_TEMP/high" test-document.pdf
+
+      - name: Uninstall
+        run: |
+          brew uninstall --cask --zap smol-pdf
+          ! command -v smolpdf

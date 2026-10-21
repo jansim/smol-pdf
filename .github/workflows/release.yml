@@ -1,6 +1,7 @@
 name: Release
 
-# Builds universal (Apple silicon + Intel) release binaries and attaches them to a release.
+# Builds universal (Apple silicon + Intel) release binaries, attaches them to a release and points
+# the Homebrew cask at them.
 # GitHub sends no events for draft releases, so for a draft run this workflow by hand
 # (Actions > Release > Run workflow) with the draft's tag; publishing it runs it again.
 on:
@@ -23,6 +24,10 @@ jobs:
   build:
     runs-on: macos-26
     timeout-minutes: 60
+
+    outputs:
+      version: ${{ steps.ref.outputs.version }}
+      sha256: ${{ steps.package.outputs.sha256 }}
 
     env:
       GH_TOKEN: ${{ github.token }}
@@ -64,6 +69,7 @@ jobs:
           build/bin/smolpdf -v -p lossless -o "$RUNNER_TEMP/lossless" test-document.pdf
 
       - name: Package
+        id: package
         run: |
           name="smol-pdf-${{ steps.ref.outputs.version }}-macos-universal"
           mkdir -p dist "$RUNNER_TEMP/$name-cli"
@@ -72,6 +78,46 @@ jobs:
           cp -R build/smol-pdf.app/Contents/Resources/Licenses "$RUNNER_TEMP/$name-cli/"
           tar -czf "dist/$name-cli.tar.gz" -C "$RUNNER_TEMP" "$name-cli"
           (cd dist && shasum -a 256 * > SHA256SUMS.txt && cat SHA256SUMS.txt)
+          echo "sha256=$(shasum -a 256 "dist/$name.zip" | cut -d ' ' -f 1)" >> "$GITHUB_OUTPUT"
 
       - name: Attach to release
         run: gh release upload "$TAG" dist/* --clobber -R "$GITHUB_REPOSITORY"
+
+  # Points the Homebrew cask at the new app, on the default branch (the tap people install from),
+  # once the release is the latest one: not for drafts, prereleases or rebuilds of older releases.
+  cask:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    env:
+      GH_TOKEN: ${{ github.token }}
+      TAG: ${{ github.event.release.tag_name || inputs.tag }}
+      VERSION: ${{ needs.build.outputs.version }}
+      SHA256: ${{ needs.build.outputs.sha256 }}
+
+    steps:
+      - name: Check that this is the latest release
+        id: latest
+        run: |
+          latest=$(gh api "repos/$GITHUB_REPOSITORY/releases/latest" -q .tag_name || true)
+          echo "Latest release: ${latest:-none}"
+          echo "update=$([ "$latest" = "$TAG" ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@v4
+        if: steps.latest.outputs.update == 'true'
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+
+      - name: Update the cask
+        if: steps.latest.outputs.update == 'true'
+        run: |
+          # The cask's download URL is .../download/v<version>/...
+          [ "$TAG" = "v$VERSION" ] || { echo "::error::Tag releases as v$VERSION for the cask, not $TAG"; exit 1; }
+          sed -i -e "s/^  version \".*\"$/  version \"$VERSION\"/" -e "s/^  sha256 \".*\"$/  sha256 \"$SHA256\"/" Casks/smol-pdf.rb
+          git diff
+          if git diff --quiet; then exit 0; fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -am "Update the Homebrew cask to $VERSION"
+          git push
