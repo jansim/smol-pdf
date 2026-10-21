@@ -1,6 +1,5 @@
 import Foundation
-import PDFKit
-import Quartz
+import SmolPDFEngine
 
 public struct CompressionResult: Hashable, Sendable {
     public var inputURL: URL
@@ -12,10 +11,12 @@ public struct CompressionResult: Hashable, Sendable {
     public var keptOriginal: Bool
     /// Where the file previously at `outputURL` ended up in the Trash, e.g. the original when replacing it.
     public var trashedURL: URL? = nil
+    /// What was changed (not stored in the history).
+    public var details: CompressionDetails? = nil
 
     public init(
         inputURL: URL, outputURL: URL, originalSize: Int64, compressedSize: Int64,
-        keptOriginal: Bool, trashedURL: URL? = nil
+        keptOriginal: Bool, trashedURL: URL? = nil, details: CompressionDetails? = nil
     ) {
         self.inputURL = inputURL
         self.outputURL = outputURL
@@ -23,6 +24,7 @@ public struct CompressionResult: Hashable, Sendable {
         self.compressedSize = compressedSize
         self.keptOriginal = keptOriginal
         self.trashedURL = trashedURL
+        self.details = details
     }
 
     /// The uncompressed file: the input, or its copy in the Trash when it was replaced.
@@ -36,11 +38,27 @@ public struct CompressionResult: Hashable, Sendable {
     }
 }
 
+/// What compression changed in a document.
+public struct CompressionDetails: Hashable, Sendable {
+    public var images: Int
+    /// Images stored in a new form (a smaller encoding, fewer pixels, or fewer colors).
+    public var imagesChanged: Int
+    public var imagesDownsampled: Int
+    /// Size of the changed images before and after.
+    public var imageBytesBefore: Int64
+    public var imageBytesAfter: Int64
+    /// Other data (page content, fonts, ...) stored with better compression.
+    public var streamsRecompressed: Int
+    /// Identical objects stored only once.
+    public var duplicatesRemoved: Int
+}
+
 public enum CompressionError: LocalizedError, Equatable {
     case cannotOpen
     case passwordRequired
     case wrongPassword
     case writeFailed
+    case failed(String)
 
     public var errorDescription: String? {
         switch self {
@@ -48,6 +66,7 @@ public enum CompressionError: LocalizedError, Equatable {
         case .passwordRequired: "The PDF is password protected."
         case .wrongPassword: "The password is incorrect."
         case .writeFailed: "The compressed PDF could not be written."
+        case .failed(let reason): "The PDF could not be compressed: \(reason)"
         }
     }
 }
@@ -55,7 +74,8 @@ public enum CompressionError: LocalizedError, Equatable {
 public enum PDFCompressor {
     /// Compresses `input` according to `profile` and writes the result to `output`.
     ///
-    /// Images are re-encoded through a Quartz filter, which keeps text and vector graphics intact.
+    /// The engine (Sources/SmolPDFEngine) re-encodes each image in the format that suits it best, keeps
+    /// text and vector graphics intact, and cleans up the file structure. Encryption is kept.
     /// If `output` already exists it is moved to the Trash first (this is how "replace original" works).
     /// With `keepOriginalIfLarger`, a result that isn't smaller than the input is discarded.
     public static func compress(
@@ -68,29 +88,13 @@ public enum PDFCompressor {
         let fm = FileManager.default
         let originalSize = fileSize(input)
 
-        guard let document = PDFDocument(url: input) else { throw CompressionError.cannotOpen }
-        var writeOptions: [PDFDocumentWriteOption: Any] = [:]
-        if document.isLocked {
-            guard let password, !password.isEmpty else { throw CompressionError.passwordRequired }
-            guard document.unlock(withPassword: password) else { throw CompressionError.wrongPassword }
-            // Keep the output protected with the same password.
-            writeOptions[.userPasswordOption] = password
-            writeOptions[.ownerPasswordOption] = password
-        }
-
-        applyStructuralChanges(to: document, profile: profile)
-
         let workDir = try fm.url(
             for: .itemReplacementDirectory, in: .userDomainMask,
             appropriateFor: output.deletingLastPathComponent(), create: true
         )
         defer { try? fm.removeItem(at: workDir) }
-
-        if let filter = makeFilter(for: profile) {
-            writeOptions[.quartzFilter] = filter
-        }
         let tempURL = workDir.appendingPathComponent("out.pdf")
-        guard document.write(to: tempURL, withOptions: writeOptions) else { throw CompressionError.writeFailed }
+        let details = try runEngine(input: input, output: tempURL, profile: profile, password: password)
 
         let compressedSize = fileSize(tempURL)
         if keepOriginalIfLarger && compressedSize >= originalSize {
@@ -108,84 +112,59 @@ public enum PDFCompressor {
         return CompressionResult(
             inputURL: input, outputURL: output,
             originalSize: originalSize, compressedSize: compressedSize, keptOriginal: false,
-            trashedURL: trashedURL as URL?
+            trashedURL: trashedURL as URL?, details: details
         )
-    }
-
-    static func applyStructuralChanges(to document: PDFDocument, profile: CompressionProfile) {
-        if profile.removeMetadata {
-            document.documentAttributes = [:]
-        }
-        if profile.removeBookmarks {
-            document.outlineRoot = nil
-        }
-        if profile.removeAnnotations {
-            for index in 0..<document.pageCount {
-                guard let page = document.page(at: index) else { continue }
-                for annotation in page.annotations { page.removeAnnotation(annotation) }
-            }
-        }
-    }
-
-    /// Builds the ColorSync filter that is applied while writing, or `nil` when nothing needs filtering.
-    ///
-    /// Image settings are the same mechanism as Preview's "Reduce File Size" filter, with tunable values.
-    /// Grayscale reuses the system "Gray Tone" filter and merges the image settings into it, so
-    /// everything happens in a single pass.
-    static func makeFilter(for profile: CompressionProfile) -> QuartzFilter? {
-        var properties: [String: Any]
-        if profile.grayscale, let gray = grayscaleFilter()?.properties() as? [String: Any] {
-            properties = gray
-        } else if profile.compressImages {
-            properties = [
-                "Name": "smol-pdf",
-                "FilterType": 1,
-                "Domains": ["Applications": true, "Printing": true],
-            ]
-        } else {
-            return nil
-        }
-
-        if profile.compressImages {
-            var data = properties["FilterData"] as? [String: Any] ?? [:]
-            var colorSettings = data["ColorSettings"] as? [String: Any] ?? [:]
-            colorSettings["ImageSettings"] = imageSettings(quality: profile.imageQuality, maxResolution: profile.maxResolution)
-            data["ColorSettings"] = colorSettings
-            properties["FilterData"] = data
-        }
-        return QuartzFilter(properties: properties)
-    }
-
-    static func imageSettings(quality: Double, maxResolution: Int?) -> [String: Any] {
-        var settings: [String: Any] = [
-            "Compression Quality": min(max(quality, 0), 1),
-            "ImageCompression": "ImageJPEGCompress",
-        ]
-        if let maxResolution, maxResolution > 0 {
-            settings["ImageScaleSettings"] = [
-                "ImageResolution": maxResolution,
-                "ImageScaleFactor": 0.0,
-                "ImageScaleInterpolate": true,
-                "ImageSizeMax": 0,
-                "ImageSizeMin": 128,
-            ] as [String: Any]
-        }
-        return settings
-    }
-
-    /// The system "Gray Tone" filter, looked up by file name so it works in every language.
-    static func grayscaleFilter() -> QuartzFilter? {
-        let all = (QuartzFilterManager.filters(inDomains: nil) as? [QuartzFilter]) ?? []
-        return all.first { $0.url()?.lastPathComponent == "Gray Tone.qfilter" }
     }
 
     public static func fileSize(_ url: URL) -> Int64 {
         let size = try? FileManager.default.attributesOfItem(atPath: url.path)[.size] as? NSNumber
         return size?.int64Value ?? 0
     }
-}
 
-extension PDFDocumentWriteOption {
-    /// Undocumented but long-standing PDFKit option that runs a `QuartzFilter` while writing.
-    static let quartzFilter = PDFDocumentWriteOption(rawValue: "QuartzFilter")
+    private static func runEngine(
+        input: URL, output: URL, profile: CompressionProfile, password: String?
+    ) throws -> CompressionDetails {
+        var options = SmolOptions()
+        smol_default_options(&options)
+        options.lossy_images = profile.compressImages ? 1 : 0
+        options.jpeg_quality = profile.imageQuality
+        options.max_resolution = Int32(profile.compressImages ? profile.maxResolution ?? 0 : 0)
+        options.grayscale = profile.grayscale ? 1 : 0
+        options.monochrome_scans = profile.monochromeScans ? 1 : 0
+        options.remove_metadata = profile.removeMetadata ? 1 : 0
+        options.remove_editing_data = profile.removeEditingData ? 1 : 0
+        options.remove_annotations = profile.removeAnnotations ? 1 : 0
+        options.remove_bookmarks = profile.removeBookmarks ? 1 : 0
+        options.remove_attachments = profile.removeAttachments ? 1 : 0
+        options.remove_javascript = profile.removeJavaScript ? 1 : 0
+
+        var stats = SmolStats()
+        let messageSize = 1024
+        var message = [CChar](repeating: 0, count: messageSize)
+        let status = input.withUnsafeFileSystemRepresentation { inputPath in
+            output.withUnsafeFileSystemRepresentation { outputPath in
+                withOptionalCString(password) { passwordPath in
+                    smol_compress(inputPath, outputPath, passwordPath, &options, &stats, &message, messageSize)
+                }
+            }
+        }
+        switch status {
+        case SMOL_OK:
+            return CompressionDetails(
+                images: stats.images, imagesChanged: stats.images_changed, imagesDownsampled: stats.images_downsampled,
+                imageBytesBefore: stats.image_bytes_before, imageBytesAfter: stats.image_bytes_after,
+                streamsRecompressed: stats.streams_recompressed, duplicatesRemoved: stats.duplicates_removed
+            )
+        case SMOL_ERROR_PASSWORD_REQUIRED: throw CompressionError.passwordRequired
+        case SMOL_ERROR_WRONG_PASSWORD: throw CompressionError.wrongPassword
+        case SMOL_ERROR_OPEN: throw CompressionError.cannotOpen
+        case SMOL_ERROR_WRITE: throw CompressionError.writeFailed
+        default: throw CompressionError.failed(String(cString: message))
+        }
+    }
+
+    private static func withOptionalCString<R>(_ string: String?, _ body: (UnsafePointer<CChar>?) -> R) -> R {
+        guard let string else { return body(nil) }
+        return string.withCString(body)
+    }
 }

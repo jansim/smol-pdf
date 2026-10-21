@@ -76,6 +76,7 @@ struct ProfileInspector: View {
                             ForEach(Set(Self.resolutions + [dpi]).sorted(), id: \.self) { Text("\($0) dpi").tag($0) }
                         }
                     }
+                    Toggle("Black & white scans as 1-bit", isOn: binding.monochromeScans)
                 }
                 .disabled(!profile.compressImages)
             }
@@ -84,8 +85,11 @@ struct ProfileInspector: View {
             Section("Document") {
                 Toggle("Convert to grayscale", isOn: binding.grayscale)
                 Toggle("Remove metadata", isOn: binding.removeMetadata)
+                Toggle("Remove editing data & thumbnails", isOn: binding.removeEditingData)
                 Toggle("Remove annotations & form fields", isOn: binding.removeAnnotations)
                 Toggle("Remove bookmarks", isOn: binding.removeBookmarks)
+                Toggle("Remove attachments", isOn: binding.removeAttachments)
+                Toggle("Remove JavaScript", isOn: binding.removeJavaScript)
             }
             .disabled(model.isCompressing)
         }

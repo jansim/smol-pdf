@@ -1,0 +1,2 @@
+// libdeflate.h is in the submodule; dependents add it to their search paths in Package.swift.
+module CDeflate {}

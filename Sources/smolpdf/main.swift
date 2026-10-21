@@ -11,12 +11,16 @@ options:
   -q, --quality <0-100>   JPEG quality, overrides the profile
   -r, --resolution <dpi>  maximum image resolution, overrides the profile
   -g, --grayscale         convert to grayscale
+  -b, --mono-scans        store black-and-white scans as 1-bit images
   -m, --strip-metadata    remove document metadata
+  -x, --strip <items>     also remove: editing (private app data, thumbnails), annotations,
+                          bookmarks, attachments, javascript, or all (comma-separated)
   -o, --output <folder>   write results into this folder
   -s, --suffix <text>     file name suffix when writing next to the original (default: -compressed)
       --replace           replace the originals (they are moved to the Trash)
       --password <pw>     password for protected PDFs
       --keep-larger       keep results even when they are larger than the original
+  -v, --verbose           show what was changed in each file
   -h, --help              show this help
 """
 
@@ -30,6 +34,7 @@ var location = OutputLocation.default
 var suffix: String?
 var password: String?
 var keepLarger = false
+var verbose = false
 var inputs: [URL] = []
 
 var args = CommandLine.arguments.dropFirst()
@@ -58,8 +63,31 @@ while let arg = args.popFirst() {
         overrides.append { $0.compressImages = true; $0.maxResolution = r }
     case "-g", "--grayscale":
         overrides.append { $0.grayscale = true }
+    case "-b", "--mono-scans":
+        overrides.append { $0.monochromeScans = true }
     case "-m", "--strip-metadata":
         overrides.append { $0.removeMetadata = true }
+    case "-x", "--strip":
+        for item in value(for: arg).lowercased().split(separator: ",") {
+            switch item.trimmingCharacters(in: .whitespaces) {
+            case "metadata": overrides.append { $0.removeMetadata = true }
+            case "editing": overrides.append { $0.removeEditingData = true }
+            case "annotations": overrides.append { $0.removeAnnotations = true }
+            case "bookmarks": overrides.append { $0.removeBookmarks = true }
+            case "attachments": overrides.append { $0.removeAttachments = true }
+            case "javascript": overrides.append { $0.removeJavaScript = true }
+            case "all":
+                overrides.append {
+                    $0.removeMetadata = true
+                    $0.removeEditingData = true
+                    $0.removeAnnotations = true
+                    $0.removeBookmarks = true
+                    $0.removeAttachments = true
+                    $0.removeJavaScript = true
+                }
+            default: fail("unknown --strip item '\(item)'")
+            }
+        }
     case "-o", "--output":
         let folder = URL(fileURLWithPath: value(for: arg), isDirectory: true)
         try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
@@ -72,6 +100,8 @@ while let arg = args.popFirst() {
         password = value(for: arg)
     case "--keep-larger":
         keepLarger = true
+    case "-v", "--verbose":
+        verbose = true
     default:
         if arg.hasPrefix("-") { fail("unknown option \(arg)\n\n\(usage)") }
         inputs.append(URL(fileURLWithPath: arg))
@@ -104,6 +134,16 @@ for file in files {
             let after = formatter.string(fromByteCount: result.compressedSize)
             let pct = Int((result.savedFraction * 100).rounded())
             print("✓ \(file.lastPathComponent): \(before) → \(after) (−\(pct)%) → \(result.outputURL.path)")
+        }
+        if verbose, let d = result.details {
+            var parts = ["\(d.imagesChanged) of \(d.images) images re-encoded"]
+            if d.imagesChanged > 0 {
+                parts[0] += " (\(formatter.string(fromByteCount: d.imageBytesBefore)) → \(formatter.string(fromByteCount: d.imageBytesAfter)))"
+            }
+            if d.imagesDownsampled > 0 { parts.append("\(d.imagesDownsampled) downsampled") }
+            if d.streamsRecompressed > 0 { parts.append("\(d.streamsRecompressed) streams recompressed") }
+            if d.duplicatesRemoved > 0 { parts.append("\(d.duplicatesRemoved) duplicates merged") }
+            print("  " + parts.joined(separator: ", "))
         }
     } catch {
         failures += 1

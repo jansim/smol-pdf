@@ -1,0 +1,4 @@
+// jpeglib.h (in the submodule) is not self-contained, so it is included textually.
+module CJPEG {
+    textual header "jconfig.h"
+}

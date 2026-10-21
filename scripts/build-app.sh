@@ -14,6 +14,13 @@ cp "$BIN/SmolPDFApp" "$APP/Contents/MacOS/"
 cp "$BIN/smolpdf" "$APP/Contents/Resources/"
 cp Resources/Info.plist "$APP/Contents/"
 cp Resources/AppIcon.icns "$APP/Contents/Resources/"
+# Licenses of the bundled libraries.
+mkdir -p "$APP/Contents/Resources/Licenses"
+cp Vendor/CQPDF/qpdf/LICENSE.txt "$APP/Contents/Resources/Licenses/qpdf-LICENSE.txt"
+cp Vendor/CQPDF/qpdf/NOTICE.md "$APP/Contents/Resources/Licenses/qpdf-NOTICE.md"
+cp Vendor/CJPEG/mozjpeg/LICENSE.md "$APP/Contents/Resources/Licenses/mozjpeg-LICENSE.md"
+cp Vendor/CJPEG/mozjpeg/README.ijg "$APP/Contents/Resources/Licenses/mozjpeg-README.ijg"
+cp Vendor/CDeflate/libdeflate/COPYING "$APP/Contents/Resources/Licenses/libdeflate-COPYING.txt"
 codesign --force --sign - "$APP"
 
 echo "Built $APP"
