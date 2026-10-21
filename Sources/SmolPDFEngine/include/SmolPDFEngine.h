@@ -53,16 +53,24 @@ typedef enum SmolStatus {
     SMOL_ERROR_WRONG_PASSWORD,
     SMOL_ERROR_WRITE,
     SMOL_ERROR_INTERNAL,
+    SMOL_CANCELLED,               /* the progress callback asked to stop */
 } SmolStatus;
+
+/* Reports progress and asks whether to go on. Called on the thread that called smol_compress, a
+   few times a second, with the estimated fraction done (0 ... 1, never decreasing). Return non-zero
+   to cancel: smol_compress then stops soon and returns SMOL_CANCELLED. */
+typedef int (*SmolProgressCallback)(void* context, double fraction);
 
 /* Sets the options to lossless defaults. */
 void smol_default_options(SmolOptions* options);
 
 /* Compresses `input` into `output` (which must differ from `input`). `password` may be NULL.
-   Encryption is kept as it was. `stats` may be NULL. On failure, a description is written to
-   `message` (when not NULL). */
+   Encryption is kept as it was. Images and streams are processed on all cores; calls from several
+   threads at once share them. `progress` and `stats` may be NULL. On failure, a description is
+   written to `message` (when not NULL), and `output` is not created. */
 SmolStatus smol_compress(
     const char* input, const char* output, const char* password, const SmolOptions* options,
+    SmolProgressCallback progress, void* progress_context,
     SmolStats* stats, char* message, size_t message_size);
 
 #ifdef __cplusplus

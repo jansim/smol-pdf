@@ -8,7 +8,9 @@
 #include <qpdf/QPDFPageObjectHelper.hh>
 #include <qpdf/QPDFWriter.hh>
 
+#include <algorithm>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <functional>
 #include <unordered_map>
@@ -42,6 +44,15 @@ std::vector<QPDFObjectHandle> reachableObjects(QPDF& pdf) {
         }
     }
     return found;
+}
+
+uint64_t streamCost(QPDFObjectHandle stream) {
+    // Filtered data is typically a few times larger decoded; libdeflate's best level then takes
+    // about 330 ns per byte.
+    long long length = 0;
+    QPDFObjectHandle dict = stream.getDict();
+    dict.getKey("/Length").getValueAsInt(length);
+    return uint64_t(std::max(length, 0LL)) * (dict.getKey("/Filter").isNull() ? 1 : 4) * 330;
 }
 
 namespace {
@@ -135,31 +146,81 @@ bool hasLossyOrImageFilter(QPDFObjectHandle filter) {
     return false;
 }
 
-// Recompresses every stream other than images (content, fonts, ...) with libdeflate, keeping the
-// original when that isn't smaller. Images were handled already.
-void recompressStreams(QPDF& pdf, SmolStats& stats) {
-    for (auto& obj : reachableObjects(pdf)) {
-        if (!obj.isStream()) continue;
-        QPDFObjectHandle dict = obj.getDict();
-        if (dict.getKey("/Subtype").isNameAndEquals("/Image")) continue;
-        // Cross-reference and object streams are rebuilt by the writer.
-        if (dict.getKey("/Type").isNameAndEquals("/XRef") || dict.getKey("/Type").isNameAndEquals("/ObjStm")) continue;
-        // The writer stores the document's XMP metadata uncompressed, so that other tools can read
-        // it and PDF/A files stay valid.
-        if (obj.isRootMetadata()) continue;
-        obj.setFilterOnWrite(false);
-        if (hasLossyOrImageFilter(dict.getKey("/Filter"))) continue;
-        try {
-            auto decoded = obj.getStreamData(qpdf_dl_specialized);
-            Bytes compressed = deflate(decoded->getBuffer(), decoded->getSize());
-            if (compressed.size() + 8 < obj.getRawStreamData()->getSize()) {
-                obj.replaceStreamData(compressed, QPDFObjectHandle::newName("/FlateDecode"), QPDFObjectHandle::newNull());
-                stats.streams_recompressed++;
-            }
-        } catch (std::exception&) {
-            // Undecodable: keep as is.
-        }
+// Whether recompressStreams handles a stream: anything but images (handled already), what the
+// writer makes, and the document's XMP metadata, which the writer stores uncompressed so that other
+// tools can read it and PDF/A files stay valid.
+bool isRecompressible(QPDFObjectHandle obj) {
+    if (!obj.isStream() || obj.isRootMetadata()) return false;
+    QPDFObjectHandle dict = obj.getDict();
+    return !dict.getKey("/Subtype").isNameAndEquals("/Image") && !dict.getKey("/Type").isNameAndEquals("/XRef") &&
+           !dict.getKey("/Type").isNameAndEquals("/ObjStm");
+}
+
+// Compresses one stream's data on a worker thread.
+class Recompression: public Task {
+  public:
+    Recompression(QPDFObjectHandle stream, Bytes decoded, size_t original, uint64_t cost, SmolStats& stats,
+                  Progress& progress) :
+        stream_(std::move(stream)),
+        decoded_(std::move(decoded)),
+        original_(original),
+        memory_(decoded_.size() * 2),
+        cost_(cost),
+        stats_(stats),
+        progress_(progress) {}
+
+    size_t memory() const override { return memory_; }
+
+    void run(Progress& progress) override {
+        progress.check();
+        compressed_ = deflate(decoded_.data(), decoded_.size());
+        Bytes().swap(decoded_);
     }
+
+    void apply(bool failed) override {
+        if (!failed && compressed_.size() + 8 < original_) {
+            stream_.replaceStreamData(compressed_, QPDFObjectHandle::newName("/FlateDecode"), QPDFObjectHandle::newNull());
+            stats_.streams_recompressed++;
+        }
+        progress_.advance(cost_);
+    }
+
+  private:
+    QPDFObjectHandle stream_;
+    Bytes decoded_, compressed_;
+    size_t original_, memory_;
+    uint64_t cost_;
+    SmolStats& stats_;
+    Progress& progress_;
+};
+
+// Recompresses every stream other than images (content, fonts, ...) with libdeflate, keeping the
+// original when that isn't smaller.
+void recompressStreams(QPDF& pdf, SmolStats& stats, Progress& progress) {
+    auto objects = reachableObjects(pdf);
+    size_t next = 0;
+    runTasks(
+        [&]() -> std::unique_ptr<Task> {
+            while (next < objects.size()) {
+                QPDFObjectHandle obj = objects[next++];
+                if (!isRecompressible(obj)) continue;
+                obj.setFilterOnWrite(false);
+                uint64_t cost = streamCost(obj);
+                if (!hasLossyOrImageFilter(obj.getDict().getKey("/Filter"))) {
+                    try {
+                        auto decoded = obj.getStreamData(qpdf_dl_specialized);
+                        size_t original = obj.getRawStreamData()->getSize();
+                        Bytes data(reinterpret_cast<char const*>(decoded->getBuffer()), decoded->getSize());
+                        return std::make_unique<Recompression>(obj, std::move(data), original, cost, stats, progress);
+                    } catch (std::exception&) {
+                        // Undecodable: keep as is.
+                    }
+                }
+                progress.advance(cost);
+            }
+            return nullptr;
+        },
+        progress);
 }
 
 void replaceReferences(QPDFObjectHandle obj, std::map<QPDFObjGen, QPDFObjectHandle> const& to, int depth) {
@@ -225,6 +286,48 @@ void mergeDuplicateStreams(QPDF& pdf, SmolStats& stats) {
     replaceReferences(pdf.getTrailer(), replacements, 0);
 }
 
+// Tells `progress` about all the work ahead, so that it moves evenly; returns the part that is
+// writing the file.
+uint64_t plan(QPDF& pdf, std::vector<QPDFPageObjectHelper>& pages, SmolOptions const& o, Progress& progress) {
+    auto objects = reachableObjects(pdf);
+    uint64_t write = objects.size() * 1000, work = 0;
+    bool images = false;
+    for (auto& obj : objects) {
+        if (!obj.isStream()) continue;
+        long long length = 0;
+        obj.getDict().getKey("/Length").getValueAsInt(length);
+        write += uint64_t(std::max(length, 0LL)) * 2;
+        if (obj.getDict().getKey("/Subtype").isNameAndEquals("/Image")) {
+            images = true;
+            work += imageCost(obj, o);
+        } else if (isRecompressible(obj)) {
+            work += streamCost(obj);
+        }
+    }
+    // Page content is parsed to externalise inline images, to drop unused resources, to find image
+    // resolutions (only needed for downsampling) and to convert colours.
+    uint64_t content = 0;
+    for (auto& page : pages) content += contentCost(page.getObjectHandle());
+    work += content * (2 + (o.lossy_images && images ? 1 : 0) + (o.grayscale ? 1 : 0));
+    progress.expect(work + write);
+    return write;
+}
+
+// With SMOL_DEBUG, prints how long each step took.
+class StepTimer {
+  public:
+    void operator()(char const* step) {
+        if (!on_) return;
+        auto now = std::chrono::steady_clock::now();
+        std::fprintf(stderr, "step %-20s %.2fs\n", step, std::chrono::duration<double>(now - last_).count());
+        last_ = now;
+    }
+
+  private:
+    bool on_ = std::getenv("SMOL_DEBUG") != nullptr;
+    std::chrono::steady_clock::time_point last_ = std::chrono::steady_clock::now();
+};
+
 void setMessage(char* message, size_t size, std::string const& text) {
     if (!message || !size) return;
     std::snprintf(message, size, "%s", text.c_str());
@@ -240,12 +343,15 @@ extern "C" void smol_default_options(SmolOptions* options) {
 
 extern "C" SmolStatus smol_compress(
     char const* input, char const* output, char const* password, SmolOptions const* options,
-    SmolStats* stats_out, char* message, size_t message_size) {
+    SmolProgressCallback progress_callback, void* progress_context, SmolStats* stats_out, char* message,
+    size_t message_size) {
     using namespace smol;
     SmolStats stats{};
     SmolOptions opts;
     if (options) opts = *options;
     else smol_default_options(&opts);
+    Progress progress(progress_callback, progress_context);
+    StepTimer step;
 
     QPDF pdf;
     pdf.setSuppressWarnings(true);
@@ -262,27 +368,53 @@ extern "C" SmolStatus smol_compress(
         setMessage(message, message_size, e.what());
         return SMOL_ERROR_OPEN;
     }
+    step("open");
 
+    uint64_t write_cost = 0;
     try {
+        progress.report(true);
         removeContent(pdf, opts);
-        QPDFPageDocumentHelper pages(pdf);
-        for (auto& page : pages.getAllPages()) {
+        std::vector<QPDFPageObjectHelper> pages = QPDFPageDocumentHelper(pdf).getAllPages();
+        write_cost = plan(pdf, pages, opts, progress);
+        step("remove and plan");
+        for (auto& page : pages) {
+            uint64_t cost = contentCost(page.getObjectHandle());
             // Larger inline images become image objects so they can be optimised too.
             // With grayscale all of them, so none keeps its colours.
             try {
                 page.externalizeInlineImages(opts.grayscale ? 0 : 4096);
             } catch (std::exception&) {
             }
+            progress.advance(cost);
+            progress.report();
         }
-        try {
-            pages.removeUnreferencedResources();
-        } catch (std::exception&) {
+        for (auto& page : pages) {
+            uint64_t cost = contentCost(page.getObjectHandle());
+            try {
+                page.removeUnreferencedResources();
+            } catch (std::exception&) {
+            }
+            progress.advance(cost);
+            progress.report();
         }
+        step("tidy pages");
         mergeDuplicateStreams(pdf, stats); // before images, so each is processed once
-        optimizeImages(pdf, opts, stats);
-        if (opts.grayscale) convertToGray(pdf);
-        recompressStreams(pdf, stats);
+        progress.report();
+        step("merge duplicates");
+        optimizeImages(pdf, opts, stats, progress);
+        step("images");
+        if (opts.grayscale) {
+            convertToGray(pdf, progress);
+            step("grayscale");
+        }
+        recompressStreams(pdf, stats, progress);
+        step("streams");
         mergeDuplicateStreams(pdf, stats); // images that became identical
+        progress.report();
+        step("merge duplicates");
+    } catch (Cancelled&) {
+        setMessage(message, message_size, "cancelled");
+        return SMOL_CANCELLED;
     } catch (std::exception& e) {
         setMessage(message, message_size, e.what());
         return SMOL_ERROR_INTERNAL;
@@ -303,13 +435,26 @@ extern "C" SmolStatus smol_compress(
         writer.setCompressStreams(true);
         writer.setDecodeLevel(qpdf_dl_generalized);
         writer.setPreserveEncryption(true);
+        uint64_t written = 0;
+        writer.registerProgressReporter(std::make_shared<QPDFWriter::FunctionProgressReporter>([&](int percent) {
+            uint64_t now = write_cost * uint64_t(std::clamp(percent, 0, 100)) / 100;
+            if (now > written) progress.advance(now - written);
+            written = std::max(written, now);
+            progress.report();
+        }));
         writer.write();
+        step("write");
+    } catch (Cancelled&) {
+        setMessage(message, message_size, "cancelled");
+        std::remove(output);
+        return SMOL_CANCELLED;
     } catch (std::exception& e) {
         setMessage(message, message_size, e.what());
         std::remove(output);
         return SMOL_ERROR_WRITE;
     }
 
+    progress.finish();
     if (stats_out) *stats_out = stats;
     return SMOL_OK;
 }

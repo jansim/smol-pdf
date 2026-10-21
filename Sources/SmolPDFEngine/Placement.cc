@@ -6,6 +6,7 @@
 #include <qpdf/QPDFPageDocumentHelper.hh>
 #include <qpdf/QPDFPageObjectHelper.hh>
 
+#include <algorithm>
 #include <cmath>
 #include <deque>
 #include <utility>
@@ -54,9 +55,11 @@ struct ContentPlacements {
 
 class Analyzer {
   public:
-    Resolutions run(QPDF& pdf) {
+    Resolutions run(QPDF& pdf, Progress& progress) {
         Resolutions result;
         for (auto& page : QPDFPageDocumentHelper(pdf).getAllPages()) {
+            progress.advance(contentCost(page.getObjectHandle()));
+            progress.report();
             double unit = 1;
             QPDFObjectHandle user_unit = page.getObjectHandle().getKey("/UserUnit");
             if (user_unit.isNumber()) unit = user_unit.getNumericValue();
@@ -223,8 +226,22 @@ class Analyzer {
 
 } // namespace
 
-Resolutions findImageResolutions(QPDF& pdf) {
-    return Analyzer().run(pdf);
+Resolutions findImageResolutions(QPDF& pdf, Progress& progress) {
+    return Analyzer().run(pdf, progress);
+}
+
+uint64_t contentCost(QPDFObjectHandle page) {
+    // About 25 ns per byte of (decoded) content, which is typically a few times its stored size.
+    QPDFObjectHandle contents = page.getKey("/Contents");
+    std::vector<QPDFObjectHandle> streams = contents.isArray() ? contents.getArrayAsVector() : std::vector{contents};
+    uint64_t cost = 0;
+    for (auto& stream : streams) {
+        if (!stream.isStream()) continue;
+        long long length = 0;
+        stream.getDict().getKey("/Length").getValueAsInt(length);
+        cost += uint64_t(std::max(length, 0LL)) * (stream.getDict().getKey("/Filter").isNull() ? 1 : 4) * 25;
+    }
+    return cost;
 }
 
 } // namespace smol

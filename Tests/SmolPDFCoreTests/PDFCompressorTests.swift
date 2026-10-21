@@ -231,7 +231,60 @@ final class PDFCompressorTests: XCTestCase {
         try FileManager.default.createDirectory(at: sub, withIntermediateDirectories: true)
         _ = try makePDF(named: "sub/b.pdf")
         FileManager.default.createFile(atPath: dir.appendingPathComponent("notes.txt").path, contents: Data("x".utf8))
-        XCTAssertEqual(Set(PDFFinder.pdfs(in: [dir]).map(\.lastPathComponent)), ["a.pdf", "b.pdf"])
+        XCTAssertEqual(PDFFinder.pdfs(in: [dir]).map(\.lastPathComponent), ["a.pdf", "b.pdf"])
+        XCTAssertEqual(PDFFinder.pdfs(in: [dir, dir.appendingPathComponent("a.pdf")]).count, 2, "each file once")
+    }
+
+    func testReportsProgress() throws {
+        let input = try makePDF(named: "photo.pdf")
+        var fractions: [Double] = []
+        _ = try PDFCompressor.compress(input: input, output: dir.appendingPathComponent("out.pdf"), profile: .medium) {
+            fractions.append($0)
+        }
+        XCTAssertFalse(fractions.isEmpty)
+        XCTAssertEqual(fractions, fractions.sorted(), "progress never goes back")
+        XCTAssertTrue(fractions.allSatisfy { (0...1).contains($0) })
+        XCTAssertEqual(fractions.last, 1)
+    }
+
+    func testCancellingStopsCompression() async throws {
+        let input = try makePDF(named: "photo.pdf")
+        let output = dir.appendingPathComponent("out.pdf")
+        // The task cancels itself as soon as compression has started.
+        let task = Task.detached {
+            try PDFCompressor.compress(input: input, output: output, profile: .medium) { _ in
+                withUnsafeCurrentTask { $0?.cancel() }
+            }
+        }
+        do {
+            _ = try await task.value
+            XCTFail("compression should have been cancelled")
+        } catch {
+            XCTAssertEqual(error as? CompressionError, .cancelled)
+        }
+        XCTAssertFalse(FileManager.default.fileExists(atPath: output.path))
+    }
+
+    func testTimeEstimate() {
+        let start = Date(timeIntervalSinceReferenceDate: 0)
+        var short = TimeEstimate(start: start)
+        short.update(fraction: 0.3, at: start + 1)
+        short.update(fraction: 0.9, at: start + 3)
+        XCTAssertNil(short.remaining, "runs projected to take less than 10 seconds show no estimate")
+
+        var long = TimeEstimate(start: start)
+        long.update(fraction: 0.1, at: start + 0.5)
+        XCTAssertNil(long.remaining, "too early to tell")
+        long.update(fraction: 0.1, at: start + 2)
+        XCTAssertEqual(long.remaining ?? 0, 18, accuracy: 0.01)
+        long.update(fraction: 0.3, at: start + 2.1)
+        XCTAssertGreaterThan(long.remaining ?? 0, 15, "a jump in progress moves the estimate gradually")
+        long.update(fraction: 0.9, at: start + 18)
+        XCTAssertEqual(long.remaining ?? 0, 2, accuracy: 0.5)
+        long.update(fraction: 0.95, at: start + 18.5)
+        XCTAssertNotNil(long.remaining, "once shown, the estimate stays")
+        long.update(fraction: 1, at: start + 19)
+        XCTAssertEqual(long.remaining, 0)
     }
 
     func testLosslessKeepsColorKeyTransparency() throws {
