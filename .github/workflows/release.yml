@@ -1,6 +1,7 @@
 name: Release
 
-# Builds universal (Apple silicon + Intel) release binaries and attaches them to a release.
+# Builds Apple silicon release binaries (or universal ones, when run by hand) and attaches them
+# to a release.
 # GitHub sends no events for draft releases, so for a draft run this workflow by hand
 # (Actions > Release > Run workflow) with the draft's tag; publishing it runs it again.
 on:
@@ -11,6 +12,10 @@ on:
       tag:
         description: Tag of the (draft) release to attach the binaries to
         required: true
+      universal:
+        description: Also build for Intel (universal binaries)
+        type: boolean
+        default: false
 
 concurrency:
   group: release-${{ github.event.release.tag_name || inputs.tag }}
@@ -27,6 +32,8 @@ jobs:
     env:
       GH_TOKEN: ${{ github.token }}
       TAG: ${{ github.event.release.tag_name || inputs.tag }}
+      ARCHS: ${{ inputs.universal && 'arm64 x86_64' || 'arm64' }}
+      PLATFORM: ${{ inputs.universal && 'macos-universal' || 'macos-arm64' }}
 
     steps:
       # A draft's tag doesn't exist until it is published: build the commit it targets instead.
@@ -51,7 +58,6 @@ jobs:
       - name: Build
         run: scripts/build-app.sh
         env:
-          ARCHS: arm64 x86_64
           VERSION: ${{ steps.ref.outputs.version }}
 
       - name: Smoke test
@@ -65,7 +71,7 @@ jobs:
 
       - name: Package
         run: |
-          name="smol-pdf-${{ steps.ref.outputs.version }}-macos-universal"
+          name="smol-pdf-${{ steps.ref.outputs.version }}-$PLATFORM"
           mkdir -p dist "$RUNNER_TEMP/$name-cli"
           ditto -c -k --sequesterRsrc --keepParent build/smol-pdf.app "dist/$name.zip"
           cp build/smol-pdf.app/Contents/Resources/smolpdf "$RUNNER_TEMP/$name-cli/"
