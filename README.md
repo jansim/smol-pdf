@@ -29,29 +29,30 @@ Earlier files are one click away in the history sidebar.
 
 ## Install
 
-smol-pdf needs macOS 14 or later. Releases are built for Apple silicon (`macos-arm64`); some are
-universal (`macos-universal`) and also run on Intel Macs. Otherwise, on an Intel Mac,
-[build it from source](#build).
+smol-pdf needs macOS 14 or later. Releases are universal: they run on Apple silicon and Intel Macs.
 
 ### With Homebrew
 
 ```sh
-brew tap jansim/smol-pdf https://github.com/jansim/smol-pdf
-brew install --cask jansim/smol-pdf/smol-pdf
+brew install --cask jansim/tools/smol-pdf
 ```
 
-This puts smol-pdf in Applications and the command-line tool `smolpdf` on your `PATH`. Use the full
-name `jansim/smol-pdf/smol-pdf` the first time: installing a cask by its full name is how you tell
-Homebrew to trust it. Homebrew 6 and later won't load casks from other taps until you trust them.
-After that, `brew upgrade` updates smol-pdf along with everything else.
+This puts the latest release of smol-pdf in Applications and the command-line tool `smolpdf` on your
+`PATH`. Use the full name `jansim/tools/smol-pdf` the first time: installing a cask by its full name is
+how you tell Homebrew to trust it. Homebrew 6 and later won't load casks from other taps until you
+trust them. The cask always points at the newest release, so a plain `brew upgrade` does not notice
+new ones; `brew upgrade --greedy smol-pdf` fetches it.
 `brew uninstall --cask --zap smol-pdf` removes it, including its settings and history.
+
+The cask used to live in this repository (the `jansim/smol-pdf` tap); Homebrew moves an existing
+install over to `jansim/tools` by itself.
 
 ### By hand
 
-Download `smol-pdf-<version>-<platform>.zip` from the
+Download `smol-pdf.zip` from the
 [latest release](https://github.com/jansim/smol-pdf/releases/latest), unzip it and move smol-pdf to
 Applications. The command-line tool is inside the app (see [Command line](#command-line)). It is also
-in the release on its own, as `smol-pdf-<version>-<platform>-cli.tar.gz`.
+in the release on its own, as `smolpdf-cli.tar.gz`.
 
 ### "Apple could not verify smol-pdf"
 
@@ -77,12 +78,11 @@ git submodules, so clone with `--recursive` (or run `git submodule update --init
 scripts/build-app.sh && open build/smol-pdf.app
 ```
 
-`ARCHS="arm64 x86_64" scripts/build-app.sh` builds universal binaries. Publishing a GitHub release
-(or running the Release workflow by hand with a draft's tag) attaches the zipped app and the
-command-line tool, built for Apple silicon, to the release; run by hand, it can build universal ones.
-Once it is the latest release, the workflow also updates the Homebrew cask (`Casks/smol-pdf.rb`; this
-repository is the tap) with a commit to the default branch. Release tags are `v` and the version,
-e.g. `v1.2`.
+`ARCHS="arm64 x86_64" scripts/build-app.sh` builds universal binaries. Pushing a tag such as `v1.2`
+builds them with that version, runs the command-line tool on a test document and publishes the zipped
+app (`smol-pdf.zip`) and the command-line tool (`smolpdf-cli.tar.gz`) in a GitHub release. The Homebrew
+cask, in [jansim/homebrew-tools](https://github.com/jansim/homebrew-tools), always installs the latest
+release, so it needs no update.
 
 For development, `swift run SmolPDFApp` starts the app without bundling, and `swift test` runs the
 engine tests.
@@ -146,7 +146,6 @@ Code layout:
 | `Sources/smolpdf` | Command-line tool |
 | `Tests/SmolPDFCoreTests` | Engine tests using generated PDFs |
 | `scripts/` | App bundling and icon generation |
-| `Casks/` | Homebrew cask (this repository is also the tap) |
 
 ## Known limitations
 
