@@ -25,7 +25,7 @@ struct ContentView: View {
             }
             // Reach under the toolbar, so its buttons float on the same background.
             .background(TranslucentBackground().ignoresSafeArea())
-            .navigationSplitViewColumnWidth(min: 400, ideal: 560)
+            .navigationSplitViewColumnWidth(min: 320, ideal: 560)
             .dropDestination(for: URL.self) { urls, _ in
                 // Nothing can be added during a run.
                 guard !model.isCompressing else { return false }

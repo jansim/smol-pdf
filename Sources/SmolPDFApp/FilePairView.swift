@@ -92,7 +92,7 @@ struct FilePair: View {
     /// The unscaled width of the pair, before it's measured.
     static var width: CGFloat { 2 * FileTile.width + middleWidth + 2 * spacing }
     /// How far the pair shrinks in a narrow window.
-    static let minScale: CGFloat = 0.65
+    static let minScale: CGFloat = 0.5
 
     @Environment(AppModel.self) private var model
     let item: PDFItem
