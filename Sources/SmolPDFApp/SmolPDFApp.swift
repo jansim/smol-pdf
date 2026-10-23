@@ -24,6 +24,9 @@ struct SmolPDFApp: App {
                 Button("Compress") { model.compress() }
                     .keyboardShortcut(.return, modifiers: .command)
                     .disabled(!model.canCompress)
+                Button("Stop Compressing") { model.cancel() }
+                    .keyboardShortcut(".", modifiers: .command)
+                    .disabled(!model.isCompressing || model.isCancelling)
                 Divider()
                 Picker("Profile", selection: $model.selectedProfileID) {
                     ForEach(CompressionProfile.builtIns) { Text(model.displayName(of: $0)).tag($0.id) }
@@ -31,9 +34,9 @@ struct SmolPDFApp: App {
                 Button("Reset Profile") { model.resetProfile(model.selectedProfileID) }
                     .disabled(!model.isCustomized(model.selectedProfileID) || model.isCompressing)
                 Divider()
-                Button("Close File") { model.close() }
+                Button("Close") { model.close() }
                     .keyboardShortcut(.delete, modifiers: [.command, .shift])
-                    .disabled(model.current == nil || model.isCompressing)
+                    .disabled(model.items.isEmpty || model.isCompressing)
             }
         }
 
@@ -56,5 +59,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         MainActor.assumeIsolated { AppModel.shared.add(urls) }
     }
 
-    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
+    /// Closing the window during a run lets it finish; the Dock icon brings the window back.
+    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
+        MainActor.assumeIsolated { !AppModel.shared.isCompressing }
+    }
+
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        MainActor.assumeIsolated { AppModel.shared.shouldTerminate() }
+    }
 }

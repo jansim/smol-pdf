@@ -58,6 +58,7 @@ public enum CompressionError: LocalizedError, Equatable {
     case passwordRequired
     case wrongPassword
     case writeFailed
+    case cancelled
     case failed(String)
 
     public var errorDescription: String? {
@@ -66,6 +67,7 @@ public enum CompressionError: LocalizedError, Equatable {
         case .passwordRequired: "The PDF is password protected."
         case .wrongPassword: "The password is incorrect."
         case .writeFailed: "The compressed PDF could not be written."
+        case .cancelled: "Compression was cancelled."
         case .failed(let reason): "The PDF could not be compressed: \(reason)"
         }
     }
@@ -78,12 +80,17 @@ public enum PDFCompressor {
     /// text and vector graphics intact, and cleans up the file structure. Encryption is kept.
     /// If `output` already exists it is moved to the Trash first (this is how "replace original" works).
     /// With `keepOriginalIfLarger`, a result that isn't smaller than the input is discarded.
+    ///
+    /// `progress` is called on the calling thread a few times a second with the estimated fraction done
+    /// (0...1, never decreasing). Cancelling the task that calls this stops compression soon and throws
+    /// `CompressionError.cancelled`; nothing is written then.
     public static func compress(
         input: URL,
         output: URL,
         profile: CompressionProfile,
         password: String? = nil,
-        keepOriginalIfLarger: Bool = true
+        keepOriginalIfLarger: Bool = true,
+        progress: ((Double) -> Void)? = nil
     ) throws -> CompressionResult {
         let fm = FileManager.default
         let originalSize = fileSize(input)
@@ -94,7 +101,7 @@ public enum PDFCompressor {
         )
         defer { try? fm.removeItem(at: workDir) }
         let tempURL = workDir.appendingPathComponent("out.pdf")
-        let details = try runEngine(input: input, output: tempURL, profile: profile, password: password)
+        let details = try runEngine(input: input, output: tempURL, profile: profile, password: password, progress: progress)
 
         let compressedSize = fileSize(tempURL)
         if keepOriginalIfLarger && compressedSize >= originalSize {
@@ -121,8 +128,14 @@ public enum PDFCompressor {
         return size?.int64Value ?? 0
     }
 
+    /// Passes the engine's progress callbacks on.
+    private final class ProgressRelay {
+        let report: ((Double) -> Void)?
+        init(_ report: ((Double) -> Void)?) { self.report = report }
+    }
+
     private static func runEngine(
-        input: URL, output: URL, profile: CompressionProfile, password: String?
+        input: URL, output: URL, profile: CompressionProfile, password: String?, progress: ((Double) -> Void)?
     ) throws -> CompressionDetails {
         var options = SmolOptions()
         smol_default_options(&options)
@@ -141,10 +154,20 @@ public enum PDFCompressor {
         var stats = SmolStats()
         let messageSize = 1024
         var message = [CChar](repeating: 0, count: messageSize)
-        let status = input.withUnsafeFileSystemRepresentation { inputPath in
-            output.withUnsafeFileSystemRepresentation { outputPath in
-                withOptionalCString(password) { passwordPath in
-                    smol_compress(inputPath, outputPath, passwordPath, &options, &stats, &message, messageSize)
+        let relay = ProgressRelay(progress)
+        let status = withExtendedLifetime(relay) {
+            input.withUnsafeFileSystemRepresentation { inputPath in
+                output.withUnsafeFileSystemRepresentation { outputPath in
+                    withOptionalCString(password) { passwordPath in
+                        smol_compress(
+                            inputPath, outputPath, passwordPath, &options,
+                            { context, fraction in
+                                Unmanaged<ProgressRelay>.fromOpaque(context!).takeUnretainedValue().report?(fraction)
+                                return Task.isCancelled ? 1 : 0
+                            },
+                            Unmanaged.passUnretained(relay).toOpaque(), &stats, &message, messageSize
+                        )
+                    }
                 }
             }
         }
@@ -159,6 +182,7 @@ public enum PDFCompressor {
         case SMOL_ERROR_WRONG_PASSWORD: throw CompressionError.wrongPassword
         case SMOL_ERROR_OPEN: throw CompressionError.cannotOpen
         case SMOL_ERROR_WRITE: throw CompressionError.writeFailed
+        case SMOL_CANCELLED: throw CompressionError.cancelled
         default: throw CompressionError.failed(String(cString: message))
         }
     }

@@ -6,7 +6,7 @@
 //
 //   - Flate with PNG predictors, tuned per row        (any image)
 //   - fewer bits per sample, a palette, true gray      (when that is exact)
-//   - CCITT Group 4                                    (1-bit images and masks)
+//   - JBIG2 generic region and CCITT Group 4           (1-bit images and masks)
 //   - optimised Huffman tables / progressive JPEG      (JPEGs, without touching pixels)
 //   - JPEG at the chosen quality                       (photographic content, lossy)
 //   - downsampling to the target resolution            (lossy)
@@ -18,6 +18,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cstdarg>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -318,12 +319,21 @@ QPDFObjectHandle intObj(long long v) {
     return QPDFObjectHandle::newInteger(v);
 }
 
+enum class Codec { Flate, CCITT, JBIG2, DCT };
+
+// One way of storing the image. Candidates are made on worker threads, so they hold no new qpdf
+// objects: Job::apply makes those.
 struct Candidate {
     Bytes data;
-    QPDFObjectHandle filter = QPDFObjectHandle::newNull();      // null for none
-    QPDFObjectHandle parms = QPDFObjectHandle::newNull();       // null for none
+    Codec codec = Codec::Flate;
+    bool predictor = false; // Flate with PNG predictors ...
+    int colors = 1;         // ... over this many samples per pixel
     int w = 0, h = 0, bpc = 0;
-    QPDFObjectHandle color_space = QPDFObjectHandle::newNull(); // null: keep
+    // The colour space, unless kept: `space`, or with a palette an Indexed space over it.
+    bool set_space = false;
+    QPDFObjectHandle space;
+    std::string palette;
+    int palette_n = 0; // components per palette entry
     bool drop_decode = false;
     bool lossy = false;
     bool resampled = false;
@@ -331,38 +341,71 @@ struct Candidate {
     std::string label; // for SMOL_DEBUG
 };
 
-// Everything known about one image while it is being optimised.
-class Job {
+// Appends printf-style text.
+void appendf(std::string& out, char const* format, ...) {
+    char buffer[256];
+    va_list args;
+    va_start(args, format);
+    std::vsnprintf(buffer, sizeof buffer, format, args);
+    va_end(args);
+    out += buffer;
+}
+
+// One image: read on the calling thread (prepare), optimised on a worker thread (run) and written
+// back on the calling thread (apply).
+class Job: public Task {
   public:
-    Job(QPDFObjectHandle image, SmolOptions const& options, bool is_smask) :
+    Job(QPDFObjectHandle image, SmolOptions const& options, double dpi, bool is_smask, bool has_matte, uint64_t cost,
+        SmolStats& stats, Progress& progress) :
         image_(std::move(image)),
         dict_(image_.getDict()),
         options_(options),
-        is_smask_(is_smask) {}
+        dpi_(dpi),
+        is_smask_(is_smask),
+        has_matte_(has_matte),
+        cost_(cost),
+        stats_(stats),
+        progress_(progress) {}
 
     bool prepare();
-    void run(double dpi, bool is_smask, bool has_matte, SmolStats& stats);
+    size_t memory() const override { return memory_; }
+    void run(Progress& progress) override;
+    void apply(bool failed) override;
 
   private:
     void addFlate(Bytes const& samples, int w, int h, int n, int bpc, Candidate base, bool predictor);
     void addFromRaster(Raster const& r, ColorSpace const& cs, bool keep_decode, bool lossy, bool resampled,
                        bool reductions_only = false);
-    QPDFObjectHandle indexedSpace(QPDFObjectHandle base, int base_n, std::string const& palette) const;
 
     QPDFObjectHandle image_;
-    QPDFObjectHandle dict_;
+    QPDFObjectHandle dict_; // not for run()
     SmolOptions const& options_;
+    double dpi_;
+    bool is_smask_;  // soft masks must stay DeviceGray
+    bool has_matte_; // its soft mask has /Matte
+    uint64_t cost_;
+    SmolStats& stats_;
+    Progress& progress_;
+
     int w_ = 0, h_ = 0, bpc_ = 0;
     bool mask_ = false;
     ColorSpace cs_;
     bool default_decode_ = true;
-    bool color_key_ = false;
-    bool is_smask_ = false; // soft masks must stay DeviceGray
+    std::vector<double> decode_; // the /Decode array, when not the default
+    bool own_matte_ = false;     // it is a soft mask with /Matte
+    bool color_key_ = false; // a /Mask array: ranges of sample values, which depend on the bit depth
+    int color_key_max_ = 0;  // ... and the largest value in it
     bool dct_ = false;
     SmolJPEGInfo jpeg_{};
-    Bytes raw_;
-    Bytes samples_; // decoded, packed samples (not for JPEGs)
+    size_t original_ = 0; // size of the stream as stored
+    Bytes jpeg_data_;     // the JPEG without any filters around it (JPEGs only)
+    Bytes samples_;       // decoded, packed samples (not for JPEGs)
+    QPDFObjectHandle gray_; // /DeviceGray
+    size_t memory_ = 0;
+
     std::vector<Candidate> candidates_;
+    int best_ = -1;
+    std::string debug_; // SMOL_DEBUG output, printed in apply()
 };
 
 bool isDefaultDecode(QPDFObjectHandle decode, int n, bool indexed, int bpc) {
@@ -397,6 +440,31 @@ std::vector<std::string> filterNames(QPDFObjectHandle filter, bool& ok) {
     return names;
 }
 
+// The parameters of each filter, as qpdf reads them: an array has one entry per filter, a single
+// dictionary applies to all.
+QPDFObjectHandle parmsOf(QPDFObjectHandle parms, int index) {
+    if (!parms.isArray()) return parms;
+    return index < parms.getArrayNItems() ? parms.getArrayItem(index) : QPDFObjectHandle::newNull();
+}
+
+// Undoes the filters wrapped around a JPEG (ReportLab writes [/ASCII85Decode /DCTDecode]), by
+// decoding the raw data through all filters but the last.
+Bytes unwrapJPEG(QPDFObjectHandle image, Bytes const& raw) {
+    QPDFObjectHandle dict = image.getDict();
+    QPDFObjectHandle filters = dict.getKey("/Filter"), parms = dict.getKey("/DecodeParms");
+    QPDFObjectHandle outer = QPDFObjectHandle::newArray(), outer_parms = QPDFObjectHandle::newArray();
+    for (int i = 0; i + 1 < filters.getArrayNItems(); ++i) {
+        outer.appendItem(filters.getArrayItem(i));
+        outer_parms.appendItem(parmsOf(parms, i));
+    }
+    // A scratch stream with just those filters; nothing refers to it, so it isn't written.
+    QPDFObjectHandle scratch = image.getQPDF().newStream();
+    scratch.replaceStreamData(raw, outer, outer_parms);
+    auto decoded = scratch.getStreamData(qpdf_dl_specialized);
+    scratch.replaceStreamData(Bytes(), QPDFObjectHandle::newNull(), QPDFObjectHandle::newNull()); // free its copy
+    return Bytes(reinterpret_cast<char const*>(decoded->getBuffer()), decoded->getSize());
+}
+
 bool Job::prepare() {
     if (!dict_.getKey("/Width").getValueAsInt(w_) || !dict_.getKey("/Height").getValueAsInt(h_)) return false;
     if (w_ <= 0 || h_ <= 0 || (unsigned long long)w_ * h_ > max_pixels) return false;
@@ -409,11 +477,12 @@ bool Job::prepare() {
         // Already efficient or not decodable here.
         if (f == "/JPXDecode" || f == "/JBIG2Decode" || f == "/CCITTFaxDecode" || f == "/Crypt") return false;
     }
-    dct_ = filters.size() == 1 && filters[0] == "/DCTDecode";
-    if (!dct_ && std::find(filters.begin(), filters.end(), "/DCTDecode") != filters.end()) return false;
+    // Other filters may be wrapped around a JPEG, but none may be applied after it.
+    dct_ = !filters.empty() && filters.back() == "/DCTDecode";
+    if (std::count(filters.begin(), filters.end(), "/DCTDecode") > (dct_ ? 1 : 0)) return false;
 
     auto raw = image_.getRawStreamData();
-    raw_.assign(reinterpret_cast<char const*>(raw->getBuffer()), raw->getSize());
+    original_ = raw->getSize();
 
     if (mask_) {
         bpc_ = 1;
@@ -428,17 +497,30 @@ bool Job::prepare() {
         }
         if (bpc_ != 1 && bpc_ != 2 && bpc_ != 4 && bpc_ != 8 && bpc_ != 16) return false;
         if (cs_.indexed && bpc_ == 16) return false;
-        default_decode_ = isDefaultDecode(dict_.getKey("/Decode"), cs_.n, cs_.indexed, bpc_);
-        color_key_ = dict_.getKey("/Mask").isArray();
+        QPDFObjectHandle decode = dict_.getKey("/Decode");
+        default_decode_ = isDefaultDecode(decode, cs_.n, cs_.indexed, bpc_);
+        for (int i = 0; !default_decode_ && i < 2 * cs_.n; ++i) {
+            double v = i % 2; // as if [0 1 0 1 ...] where values are missing
+            if (decode.isArray()) decode.getArrayItem(i).getValueAsNumber(v);
+            decode_.push_back(v);
+        }
+        own_matte_ = dict_.hasKey("/Matte");
+        QPDFObjectHandle key = dict_.getKey("/Mask");
+        color_key_ = key.isArray();
+        for (int i = 0; color_key_ && i < key.getArrayNItems(); ++i) {
+            int v = 0;
+            if (key.getArrayItem(i).getValueAsInt(v)) color_key_max_ = std::max(color_key_max_, v);
+        }
     }
 
     if (dct_) {
-        QPDFObjectHandle parms = dict_.getKey("/DecodeParms");
-        if (parms.isArray() && parms.getArrayNItems() == 1) parms = parms.getArrayItem(0);
+        QPDFObjectHandle parms = parmsOf(dict_.getKey("/DecodeParms"), int(filters.size()) - 1);
         if (parms.isDictionary() && parms.hasKey("/ColorTransform")) return false;
         if (cs_.indexed) return false;
-        auto const* data = reinterpret_cast<unsigned char const*>(raw_.data());
-        if (!smol_jpeg_info(data, raw_.size(), &jpeg_)) return false;
+        jpeg_data_.assign(reinterpret_cast<char const*>(raw->getBuffer()), raw->getSize());
+        if (filters.size() > 1) jpeg_data_ = unwrapJPEG(image_, jpeg_data_);
+        auto const* data = reinterpret_cast<unsigned char const*>(jpeg_data_.data());
+        if (!smol_jpeg_info(data, jpeg_data_.size(), &jpeg_)) return false;
         if (jpeg_.width != w_ || jpeg_.height != h_ || jpeg_.components != cs_.n || jpeg_.precision != 8) {
             return false;
         }
@@ -448,23 +530,26 @@ bool Job::prepare() {
         if (buffer->getSize() < need) return false; // truncated
         samples_.assign(reinterpret_cast<char const*>(buffer->getBuffer()), need);
     }
+    gray_ = name("/DeviceGray");
+    // The samples, plus decoded pixels and candidates made from them while running.
+    memory_ = samples_.size() + jpeg_data_.size() + size_t(w_) * size_t(h_) * size_t(std::max(cs_.n, 1)) * 3;
     return true;
 }
 
 void Job::addFlate(Bytes const& samples, int w, int h, int n, int bpc, Candidate base, bool predictor) {
     base.w = w, base.h = h, base.bpc = bpc;
-    base.filter = name("/FlateDecode");
+    base.codec = Codec::Flate;
     // Predictors pay off on continuous-tone data; on 1-bit and palette data try both when cheap.
     bool try_plain = !predictor || samples.size() <= (4u << 20);
     bool try_predicted = predictor || (bpc < 8 && samples.size() <= (4u << 20));
     auto flate = [&](Candidate& c, Bytes input, char const* label) {
+        progress_.check();
         c.data = deflate(input.data(), input.size(), estimate_level);
         c.pending = std::move(input);
         c.label = label;
     };
     if (try_plain) {
         Candidate c = base;
-        c.parms = QPDFObjectHandle::newNull();
         flate(c, samples, "flate");
         candidates_.push_back(std::move(c));
     }
@@ -473,40 +558,24 @@ void Job::addFlate(Bytes const& samples, int w, int h, int n, int bpc, Candidate
         size_t bpp = std::max<size_t>(1, size_t(n * bpc) / 8);
         Candidate c = base;
         flate(c, pngPredict(reinterpret_cast<uint8_t const*>(samples.data()), size_t(h), row, bpp), "flate+png");
-        c.parms = QPDFObjectHandle::newDictionary({
-            {"/Predictor", intObj(15)},
-            {"/Colors", intObj(n)},
-            {"/BitsPerComponent", intObj(bpc)},
-            {"/Columns", intObj(w)},
-        });
+        c.predictor = true;
+        c.colors = n;
         candidates_.push_back(std::move(c));
     }
     if (n == 1 && bpc == 1) {
+        progress_.check();
         Candidate c = base;
-        c.filter = name("/CCITTFaxDecode");
+        c.codec = Codec::CCITT;
         c.data = ccittG4(reinterpret_cast<uint8_t const*>(samples.data()), w, h);
         c.label = "g4";
-        c.parms = QPDFObjectHandle::newDictionary({
-            {"/K", intObj(-1)},
-            {"/Columns", intObj(w)},
-            {"/Rows", intObj(h)},
-        });
         candidates_.push_back(std::move(c));
 
         Candidate j = base;
-        j.filter = name("/JBIG2Decode");
-        j.parms = QPDFObjectHandle::newNull();
+        j.codec = Codec::JBIG2;
         j.data = jbig2Generic(reinterpret_cast<uint8_t const*>(samples.data()), w, h);
         j.label = "jbig2";
         candidates_.push_back(std::move(j));
     }
-}
-
-QPDFObjectHandle Job::indexedSpace(QPDFObjectHandle base, int base_n, std::string const& palette) const {
-    int entries = int(palette.size()) / base_n;
-    return QPDFObjectHandle::newArray({
-        name("/Indexed"), base, intObj(entries - 1), QPDFObjectHandle::newString(palette),
-    });
 }
 
 // Adds lossless encodings of `r` (in colour space `cs`): as is, with fewer bits, or as a palette.
@@ -517,13 +586,16 @@ void Job::addFromRaster(Raster const& r, ColorSpace const& cs, bool keep_decode,
     Candidate base;
     base.lossy = lossy;
     base.resampled = resampled;
-    base.color_space = cs.indexed ? indexedSpace(cs.base, cs.base_n, cs.palette) : cs.object;
+    base.set_space = true;
+    base.space = cs.indexed ? cs.base : cs.object;
+    if (cs.indexed) base.palette = cs.palette, base.palette_n = cs.base_n;
     base.drop_decode = !keep_decode;
 
     if (cs.indexed) {
         int max_index = 0;
         for (uint8_t v : r.px) max_index = std::max<int>(max_index, v);
-        int bits = bitsForCount(max_index + 1);
+        // Fewer bits keep the indices as they are, but a colour key's values must still fit.
+        int bits = bitsForCount(std::max(max_index, color_key_max_) + 1);
         if (reductions_only && bits >= bpc_) return;
         // A Decode array of an Indexed image depends on the bit depth; it must be the default.
         if (!keep_decode || default_decode_ || bits == bpc_) {
@@ -535,7 +607,7 @@ void Job::addFromRaster(Raster const& r, ColorSpace const& cs, bool keep_decode,
 
     // Gray with few levels can use fewer bits. Values are scaled 0-255, so this is exact when
     // every value is a multiple of 255 / (2^bits - 1).
-    if (r.n == 1) {
+    if (r.n == 1 && !color_key_) {
         bool b1 = true, b2 = true, b4 = true;
         for (uint8_t v : r.px) {
             b1 = b1 && (v == 0 || v == 255);
@@ -560,7 +632,9 @@ void Job::addFromRaster(Raster const& r, ColorSpace const& cs, bool keep_decode,
         PaletteResult p = makePalette(r, r.n == 1 ? 16 : 256);
         if (p.fits) {
             Candidate c = base;
-            c.color_space = indexedSpace(cs.object, cs.n, p.palette);
+            c.space = cs.object;
+            c.palette = std::move(p.palette);
+            c.palette_n = cs.n;
             c.drop_decode = true;
             int bits = bitsForCount(p.count);
             addFlate(pack(p.indices, r.w, r.h, 1, bits), r.w, r.h, 1, bits, c, false);
@@ -568,10 +642,12 @@ void Job::addFromRaster(Raster const& r, ColorSpace const& cs, bool keep_decode,
     }
 }
 
-void Job::run(double dpi, bool is_smask, bool has_matte, SmolStats& stats) {
+void Job::run(Progress& progress) {
+    progress.check();
     double started = now();
+    double dpi = dpi_;
     bool lossy_ok = options_.lossy_images != 0;
-    size_t original = raw_.size();
+    size_t original = original_;
 
     if (mask_) {
         Candidate base;
@@ -580,34 +656,40 @@ void Job::run(double dpi, bool is_smask, bool has_matte, SmolStats& stats) {
         // 1. The image as it is, stored better.
         Raster r;
         if (dct_) {
-            size_t size = 0;
-            auto const* data = reinterpret_cast<unsigned char const*>(raw_.data());
-            if (unsigned char* optimized = smol_jpeg_optimize(data, raw_.size(), &size)) {
+            auto addJPEG = [&](Bytes data, char const* label) {
                 Candidate c;
-                c.data.assign(reinterpret_cast<char*>(optimized), size);
-                free(optimized);
-                c.filter = name("/DCTDecode");
-                c.parms = QPDFObjectHandle::newNull();
+                c.data = std::move(data);
+                c.codec = Codec::DCT;
                 c.w = w_, c.h = h_, c.bpc = 8;
-                c.label = "jpeg-optimized";
+                c.label = label;
                 candidates_.push_back(std::move(c));
+            };
+            // Just the JPEG, in case optimising it fails, when other filters were wrapped around it.
+            if (jpeg_data_.size() < original) addJPEG(jpeg_data_, "jpeg-unwrapped");
+            size_t size = 0;
+            auto const* data = reinterpret_cast<unsigned char const*>(jpeg_data_.data());
+            if (unsigned char* optimized = smol_jpeg_optimize(data, jpeg_data_.size(), &size)) {
+                addJPEG(Bytes(reinterpret_cast<char*>(optimized), size), "jpeg-optimized");
+                free(optimized);
             }
+            progress.check();
             SmolJPEGInfo info{};
-            if (unsigned char* px = smol_jpeg_decode(data, raw_.size(), &info)) {
+            if (unsigned char* px = smol_jpeg_decode(data, jpeg_data_.size(), &info)) {
                 r = {w_, h_, cs_.n, std::vector<uint8_t>(px, px + size_t(w_) * h_ * cs_.n)};
                 free(px);
             }
         } else {
             Candidate base;
             addFlate(samples_, w_, h_, cs_.n, bpc_, base, !cs_.indexed && bpc_ >= 8);
-            if (bpc_ != 16 || lossy_ok) r = unpack(samples_, w_, h_, cs_.n, bpc_, !cs_.indexed);
+            // 16-bit samples are reduced to 8 bits only in lossy profiles, and never with a colour key.
+            if (bpc_ != 16 || (lossy_ok && !color_key_)) r = unpack(samples_, w_, h_, cs_.n, bpc_, !cs_.indexed);
         }
 
         if (!r.px.empty()) {
             ColorSpace cs = cs_;
             bool keep_decode = true;
             bool lossy = bpc_ == 16; // 16-bit samples were reduced to 8
-            bool recolor_ok = !color_key_ && !has_matte;
+            bool recolor_ok = !color_key_ && !has_matte_;
 
             // Fewer bits or a palette may be exact and smaller, whatever else happens below.
             if (!lossy && (bpc_ == 8 || dct_)) addFromRaster(r, cs, true, false, false, true);
@@ -616,11 +698,8 @@ void Job::run(double dpi, bool is_smask, bool has_matte, SmolStats& stats) {
             // changing the colour space (Indexed images map indices, not colours, so skip).
             auto normalize = [&]() {
                 if (keep_decode && !default_decode_ && !cs.indexed) {
-                    QPDFObjectHandle decode = dict_.getKey("/Decode");
-                    for (int c = 0; c < r.n; ++c) {
-                        double lo = 0, hi = 1;
-                        decode.getArrayItem(2 * c).getValueAsNumber(lo);
-                        decode.getArrayItem(2 * c + 1).getValueAsNumber(hi);
+                    for (int c = 0; c < r.n && 2 * c + 1 < int(decode_.size()); ++c) {
+                        double lo = decode_[size_t(2 * c)], hi = decode_[size_t(2 * c + 1)];
                         for (size_t i = size_t(c); i < r.px.size(); i += size_t(r.n)) {
                             double v = lo + r.px[i] / 255.0 * (hi - lo);
                             r.px[i] = uint8_t(std::clamp(std::lround(v * 255), 0L, 255L));
@@ -645,11 +724,11 @@ void Job::run(double dpi, bool is_smask, bool has_matte, SmolStats& stats) {
                     std::vector<uint8_t> gray = toGray(values, count, cs.family);
                     if (cs.indexed) {
                         cs.palette.assign(gray.begin(), gray.end());
-                        cs.base = name("/DeviceGray");
+                        cs.base = gray_;
                         cs.base_n = 1;
                     } else {
                         r = {r.w, r.h, 1, std::move(gray)};
-                        cs.object = cs.base = name("/DeviceGray");
+                        cs.object = cs.base = gray_;
                         cs.n = cs.base_n = 1;
                     }
                     cs.family = Family::Gray;
@@ -661,7 +740,7 @@ void Job::run(double dpi, bool is_smask, bool has_matte, SmolStats& stats) {
             // 3. Black-and-white scans become 1-bit images (at full resolution: sharper and
             //    smaller than a downsampled gray image).
             bool monochrome = false;
-            if (lossy_ok && options_.monochrome_scans && !is_smask && can_recolor && !cs.indexed &&
+            if (lossy_ok && options_.monochrome_scans && !is_smask_ && can_recolor && !cs.indexed &&
                 cs.family == Family::Gray && bpc_ > 1 && dpi >= 150 && (long long)r.w * r.h >= 250000) {
                 size_t extreme = 0;
                 for (uint8_t v : r.px) extreme += (v <= 48 || v >= 207);
@@ -680,7 +759,7 @@ void Job::run(double dpi, bool is_smask, bool has_matte, SmolStats& stats) {
                 bilevel = std::all_of(r.px.begin(), r.px.end(), [](uint8_t v) { return v == 0 || v == 255; });
             }
             // With /Matte, an image and its soft mask must keep equal sizes, so neither is resampled.
-            bool matte = has_matte || dict_.hasKey("/Matte");
+            bool matte = has_matte_ || own_matte_;
             bool resampled = false;
             if (lossy_ok && !bilevel && !matte && options_.max_resolution > 0 && dpi > 0 &&
                 dpi > options_.max_resolution * downsample_threshold && !color_key_ &&
@@ -706,16 +785,18 @@ void Job::run(double dpi, bool is_smask, bool has_matte, SmolStats& stats) {
                 }
             }
 
+            progress.check();
             if (changed) addFromRaster(r, cs, keep_decode, lossy, resampled);
 
             // 5. JPEG for photographic content.
-            bool jpeg_ok = lossy_ok && !is_smask && !bilevel && !color_key_ && !cs.indexed &&
+            bool jpeg_ok = lossy_ok && !is_smask_ && !bilevel && !color_key_ && !cs.indexed &&
                            (long long)r.w * r.h >= 4096 &&
                            (cs.family == Family::Gray || cs.family == Family::RGB ||
                             (cs.family == Family::CMYK && dct_ && keep_decode));
             if (jpeg_ok && r.n > 1 && makePalette(r).fits) jpeg_ok = false; // few colours: lossless
             if (jpeg_ok && r.n == 1 && !dct_ && !changed && makePalette(r, 16).fits) jpeg_ok = false;
             if (jpeg_ok) {
+                progress.check();
                 int quality = int(std::lround(std::clamp(options_.jpeg_quality, 0.0, 1.0) * 100));
                 quality = std::clamp(quality, 1, 100);
                 size_t size = 0;
@@ -724,16 +805,17 @@ void Job::run(double dpi, bool is_smask, bool has_matte, SmolStats& stats) {
                     Candidate c;
                     c.data.assign(reinterpret_cast<char*>(jpg), size);
                     free(jpg);
-                    c.filter = name("/DCTDecode");
-                    c.parms = QPDFObjectHandle::newNull();
+                    c.codec = Codec::DCT;
                     c.w = r.w, c.h = r.h, c.bpc = 8;
-                    c.color_space = cs.object;
+                    c.set_space = true;
+                    c.space = cs.object;
                     c.drop_decode = !keep_decode;
                     c.lossy = true;
                     c.resampled = resampled;
                     c.label = "jpeg q" + std::to_string(quality);
-                    // Re-encoding a JPEG without other changes only adds artefacts; it must pay.
-                    if (dct_ && !changed && c.data.size() > original * 9 / 10) c.data.clear();
+                    // Re-encoding a JPEG without other changes only adds artefacts; it must pay
+                    // against the JPEG itself (removing filters around it costs nothing).
+                    if (dct_ && !changed && c.data.size() > jpeg_data_.size() * 9 / 10) c.data.clear();
                     if (!c.data.empty()) candidates_.push_back(std::move(c));
                 }
             }
@@ -741,13 +823,13 @@ void Job::run(double dpi, bool is_smask, bool has_matte, SmolStats& stats) {
     }
 
     if (debugging()) {
-        std::fprintf(stderr, "image %d %d: %dx%d bpc %d n %d%s%s dpi %.0f, original %zu (%.2fs)\n",
-                     image_.getObjGen().getObj(), image_.getObjGen().getGen(), w_, h_, bpc_, cs_.n,
-                     dct_ ? " jpeg" : "", cs_.indexed ? " indexed" : "", dpi, original, now() - started);
+        appendf(debug_, "image %d %d: %dx%d bpc %d n %d%s%s dpi %.0f, original %zu (%.2fs)\n",
+                image_.getObjGen().getObj(), image_.getObjGen().getGen(), w_, h_, bpc_, cs_.n, dct_ ? " jpeg" : "",
+                cs_.indexed ? " indexed" : "", dpi, original, now() - started);
+        static char const* const codecs[] = {"/FlateDecode", "/CCITTFaxDecode", "/JBIG2Decode", "/DCTDecode"};
         for (auto const& c : candidates_) {
-            std::fprintf(stderr, "  %-16s %4dx%-4d bpc %d %s%s%s %zu\n", c.label.c_str(), c.w, c.h, c.bpc,
-                         c.filter.isName() ? c.filter.getName().c_str() : "-", c.lossy ? " lossy" : "",
-                         c.resampled ? " resampled" : "", c.data.size());
+            appendf(debug_, "  %-16s %4dx%-4d bpc %d %s%s%s %zu\n", c.label.c_str(), c.w, c.h, c.bpc,
+                    codecs[int(c.codec)], c.lossy ? " lossy" : "", c.resampled ? " resampled" : "", c.data.size());
         }
     }
 
@@ -760,44 +842,112 @@ void Job::run(double dpi, bool is_smask, bool has_matte, SmolStats& stats) {
     for (auto const& c : candidates_) lowest = lowest == 0 ? score(c) : std::min(lowest, score(c));
     for (auto& c : candidates_) {
         if (!c.pending.empty() && score(c) <= lowest * 1.15) {
+            progress.check();
             c.data = deflate(c.pending.data(), c.pending.size());
             Bytes().swap(c.pending);
         }
     }
-    Candidate* best = nullptr;
-    for (auto& c : candidates_) {
-        if (!best || score(c) < score(*best)) best = &c;
+    for (size_t i = 0; i < candidates_.size(); ++i) {
+        if (best_ < 0 || score(candidates_[i]) < score(candidates_[size_t(best_)])) best_ = int(i);
     }
-    if (!best) return;
-    if (debugging()) std::fprintf(stderr, "  -> %s %zu (%.2fs)\n", best->label.c_str(), best->data.size(), now() - started);
-    if (!best->pending.empty()) return; // can't happen: the best is always within reach
-    if (best->data.size() + 16 >= original) return;
+    if (best_ >= 0 && debugging()) {
+        Candidate const& best = candidates_[size_t(best_)];
+        appendf(debug_, "  -> %s %zu (%.2fs)\n", best.label.c_str(), best.data.size(), now() - started);
+    }
+    // Free all but the winner before the job waits to be applied.
+    for (size_t i = 0; i < candidates_.size(); ++i) {
+        if (int(i) != best_) candidates_[i] = Candidate();
+    }
+    Bytes().swap(samples_);
+    Bytes().swap(jpeg_data_);
+}
 
-    image_.replaceStreamData(best->data, best->filter, best->parms);
-    dict_.replaceKey("/Width", intObj(best->w));
-    dict_.replaceKey("/Height", intObj(best->h));
-    if (!mask_) dict_.replaceKey("/BitsPerComponent", intObj(best->bpc));
-    if (!best->color_space.isNull()) dict_.replaceKey("/ColorSpace", best->color_space);
-    if (best->drop_decode) dict_.removeKey("/Decode");
-    dict_.removeKey("/DL");
+void Job::apply(bool failed) {
+    progress_.advance(cost_);
     image_.setFilterOnWrite(false);
+    if (debugging()) std::fputs(debug_.c_str(), stderr);
+    if (failed || best_ < 0) return;
+    Candidate const& best = candidates_[size_t(best_)];
+    if (!best.pending.empty()) return; // can't happen: the best is always within reach
+    if (best.data.size() + 16 >= original_) return;
 
-    stats.images_changed++;
-    if (best->resampled) stats.images_downsampled++;
-    stats.image_bytes_before += (long long)original;
-    stats.image_bytes_after += (long long)best->data.size();
+    QPDFObjectHandle filter, parms = QPDFObjectHandle::newNull();
+    switch (best.codec) {
+    case Codec::Flate:
+        filter = name("/FlateDecode");
+        if (best.predictor) {
+            parms = QPDFObjectHandle::newDictionary({
+                {"/Predictor", intObj(15)},
+                {"/Colors", intObj(best.colors)},
+                {"/BitsPerComponent", intObj(best.bpc)},
+                {"/Columns", intObj(best.w)},
+            });
+        }
+        break;
+    case Codec::CCITT:
+        filter = name("/CCITTFaxDecode");
+        parms = QPDFObjectHandle::newDictionary({{"/K", intObj(-1)}, {"/Columns", intObj(best.w)}, {"/Rows", intObj(best.h)}});
+        break;
+    case Codec::JBIG2: filter = name("/JBIG2Decode"); break;
+    case Codec::DCT: filter = name("/DCTDecode"); break;
+    }
+    image_.replaceStreamData(best.data, filter, parms);
+    dict_.replaceKey("/Width", intObj(best.w));
+    dict_.replaceKey("/Height", intObj(best.h));
+    if (!mask_) dict_.replaceKey("/BitsPerComponent", intObj(best.bpc));
+    if (best.set_space) {
+        if (best.palette.empty()) {
+            dict_.replaceKey("/ColorSpace", best.space);
+        } else {
+            int entries = int(best.palette.size()) / best.palette_n;
+            dict_.replaceKey("/ColorSpace", QPDFObjectHandle::newArray({
+                name("/Indexed"), best.space, intObj(entries - 1), QPDFObjectHandle::newString(best.palette),
+            }));
+        }
+    }
+    if (best.drop_decode) dict_.removeKey("/Decode");
+    dict_.removeKey("/DL");
+
+    stats_.images_changed++;
+    if (best.resampled) stats_.images_downsampled++;
+    stats_.image_bytes_before += (long long)original_;
+    stats_.image_bytes_after += (long long)best.data.size();
 }
 
 } // namespace
 
-void optimizeImages(QPDF& pdf, SmolOptions const& options, SmolStats& stats) {
-    Resolutions resolutions = findImageResolutions(pdf);
+uint64_t imageCost(QPDFObjectHandle image, SmolOptions const& options) {
+    // Measured: about 200 ns per byte of samples for Flate (libdeflate's best level dominates), and
+    // 50 ns for JPEGs, whether optimised or re-encoded.
+    QPDFObjectHandle dict = image.getDict();
+    long long w = 0, h = 0, bpc = 8;
+    dict.getKey("/Width").getValueAsInt(w);
+    dict.getKey("/Height").getValueAsInt(h);
+    dict.getKey("/BitsPerComponent").getValueAsInt(bpc);
+    ColorSpace cs;
+    int n = 1;
+    try {
+        if (parseColorSpace(dict.getKey("/ColorSpace"), cs)) n = cs.n;
+    } catch (std::exception&) {
+        // A damaged palette: the image will be skipped.
+    }
+    bool ok = true;
+    auto filters = filterNames(dict.getKey("/Filter"), ok);
+    bool jpeg = std::find(filters.begin(), filters.end(), "/DCTDecode") != filters.end();
+    double bytes = double(std::max(w, 0LL)) * double(std::max(h, 0LL)) * n * double(std::clamp(bpc, 1LL, 16LL)) / 8;
+    return uint64_t(std::min(bytes, 1e12) * (jpeg ? 50 : 200));
+}
 
+void optimizeImages(QPDF& pdf, SmolOptions const& options, SmolStats& stats, Progress& progress) {
     std::vector<QPDFObjectHandle> images;
-    for (auto& obj : reachableObjects(pdf)) {
+    for (auto& obj : reachableObjects(pdf, &progress)) {
         if (obj.isStream() && obj.getDict().getKey("/Subtype").isNameAndEquals("/Image")) images.push_back(obj);
     }
     stats.images = long(images.size());
+
+    // Resolutions only matter for downsampling and 1-bit scans, which are lossy.
+    Resolutions resolutions;
+    if (options.lossy_images && !images.empty()) resolutions = findImageResolutions(pdf, progress);
 
     // Soft masks follow their images: same displayed size, so resolution scales with width.
     std::map<QPDFObjGen, double> smask_dpi;
@@ -825,28 +975,38 @@ void optimizeImages(QPDF& pdf, SmolOptions const& options, SmolStats& stats) {
         if (!inserted) it->second = std::min(it->second, d);
     }
 
-    for (auto& image : images) {
-        QPDFObjGen og = image.getObjGen();
-        bool is_smask = smasks.count(og) > 0;
-        double dpi = -1;
-        if (is_smask) {
-            auto it = smask_dpi.find(og);
-            if (!smask_unknown.count(og) && it != smask_dpi.end()) dpi = it->second;
-            // Also drawn directly somewhere? Then the larger of both uses decides.
-            double direct = dpiOf(og);
-            if (resolutions.unknown.count(og)) dpi = -1;
-            else if (direct > 0 && dpi > 0) dpi = std::min(dpi, direct);
-        } else {
-            dpi = dpiOf(og);
-        }
-        try {
-            Job job(image, options, is_smask);
-            if (job.prepare()) job.run(dpi, is_smask, matte_parents.count(og) > 0, stats);
-        } catch (std::exception&) {
-            // Leave this image as it is.
-        }
-        image.setFilterOnWrite(false);
-    }
+    size_t next = 0;
+    runTasks(
+        [&]() -> std::unique_ptr<Task> {
+            while (next < images.size()) {
+                QPDFObjectHandle image = images[next++];
+                QPDFObjGen og = image.getObjGen();
+                bool is_smask = smasks.count(og) > 0;
+                double dpi = -1;
+                if (is_smask) {
+                    auto it = smask_dpi.find(og);
+                    if (!smask_unknown.count(og) && it != smask_dpi.end()) dpi = it->second;
+                    // Also drawn directly somewhere? Then the larger of both uses decides.
+                    double direct = dpiOf(og);
+                    if (resolutions.unknown.count(og)) dpi = -1;
+                    else if (direct > 0 && dpi > 0) dpi = std::min(dpi, direct);
+                } else {
+                    dpi = dpiOf(og);
+                }
+                uint64_t cost = imageCost(image, options);
+                try {
+                    auto job = std::make_unique<Job>(image, options, dpi, is_smask, matte_parents.count(og) > 0, cost,
+                                                     stats, progress);
+                    if (job->prepare()) return job;
+                } catch (std::exception&) {
+                    // Leave this image as it is.
+                }
+                image.setFilterOnWrite(false);
+                progress.advance(cost);
+            }
+            return nullptr;
+        },
+        progress);
 }
 
 } // namespace smol

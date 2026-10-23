@@ -1,4 +1,4 @@
-// Lossless encoders: Flate (libdeflate), PNG predictors and CCITT Group 4.
+// Lossless encoders: Flate (libdeflate), PNG predictors, CCITT Group 4 and JBIG2.
 
 #include "Engine.hh"
 
@@ -7,6 +7,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <memory>
+#include <mutex>
 #include <stdexcept>
 #include <vector>
 
@@ -21,6 +22,12 @@ struct CompressorDeleter {
 } // namespace
 
 Bytes deflate(void const* data, size_t size, int level) {
+    // libdeflate picks its CPU-specific checksum code on first use, racily if threads start together.
+    static std::once_flag dispatched;
+    std::call_once(dispatched, [] {
+        char none = 0;
+        libdeflate_adler32(1, &none, 0);
+    });
     // Level 12 is libdeflate's best; drop a little for very large streams.
     if (level <= 0 || level > 12) level = size <= (16u << 20) ? 12 : size <= (64u << 20) ? 9 : 6;
     thread_local std::unique_ptr<libdeflate_compressor, CompressorDeleter> compressors[13];

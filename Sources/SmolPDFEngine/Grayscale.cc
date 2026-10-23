@@ -264,13 +264,13 @@ QPDFObjectHandle colorSpacesOf(QPDFObjectHandle resources) {
 
 } // namespace
 
-void convertToGray(QPDF& pdf) {
+void convertToGray(QPDF& pdf, Progress& progress) {
     // 1. Every content stream, with its colour spaces as they are now.
     std::vector<Content> contents;
     for (auto& page : QPDFPageDocumentHelper(pdf).getAllPages()) {
         contents.push_back({page.getObjectHandle(), true, colorSpacesOf(page.getAttribute("/Resources", false))});
     }
-    auto objects = reachableObjects(pdf);
+    auto objects = reachableObjects(pdf, &progress);
     for (auto& obj : objects) {
         QPDFObjectHandle dict = obj.isStream() ? obj.getDict() : obj;
         if (!dict.isDictionary()) continue;
@@ -289,6 +289,8 @@ void convertToGray(QPDF& pdf) {
     // 2. Rewrite their colour operators. Colour spaces whose users can't all be rewritten stay.
     std::vector<QPDFObjectHandle> keep;
     for (auto& c : contents) {
+        if (c.is_page) progress.advance(contentCost(c.owner));
+        progress.report();
         try {
             GrayFilter filter(kindsOf(c.color_spaces));
             std::string out;
