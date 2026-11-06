@@ -88,7 +88,9 @@ scripts/build-app.sh && open build/smol-pdf.app
 builds them with that version, runs the command-line tool on a test document and publishes the zipped
 app (`smol-pdf.zip`) and the command-line tool (`smolpdf-cli.tar.gz`) in a GitHub release. The Homebrew
 cask, in [jansim/homebrew-tools](https://github.com/jansim/homebrew-tools), always installs the latest
-release, so it needs no update.
+release, so it needs no update. A release published in the GitHub UI, new or from a draft, is built
+the same way and gets the binaries uploaded in place, keeping its notes. GitHub starts no workflow for
+drafts, so to fill a draft, run the Release workflow by hand with its tag.
 
 For development, `swift run SmolPDFApp` starts the app without bundling, and `swift test` runs the
 engine tests.
