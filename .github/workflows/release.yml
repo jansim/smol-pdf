@@ -1,22 +1,64 @@
 name: Release
 
-# Push a tag such as v1.1 to publish a release. The Homebrew cask
-# (jansim/tools/smol-pdf) installs the latest release's smol-pdf.zip.
+# Three ways to publish a release. The Homebrew cask (jansim/tools/smol-pdf)
+# installs the latest release's smol-pdf.zip.
+#
+# - Push a tag such as v1.1: builds it and creates the release.
+# - Publish a release in the GitHub UI, new or from a draft: builds its tag
+#   and uploads the binaries to that release in place, keeping its title and
+#   notes.
+# - Run this workflow by hand with a tag, for a draft: GitHub starts no
+#   workflow for drafts. A draft whose tag does not exist yet is built from
+#   its target branch or commit, and stays a draft.
+#
+# A release that already exists for the tag, draft or not, gets its binaries
+# replaced; otherwise one is created with generated notes.
 on:
   push:
     tags: ["v*"]
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Tag of the release to build, such as v1.1
+        required: true
 
 permissions:
   contents: write
 
+# Publishing a release in the UI with a new tag fires both a tag push and a
+# release event; only the last run for a tag is kept.
+concurrency:
+  group: release-${{ github.event.release.tag_name || inputs.tag || github.ref_name }}
+  cancel-in-progress: true
+
 jobs:
   release:
     runs-on: macos-26
+    if: github.event_name != 'release' || startsWith(github.event.release.tag_name, 'v')
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      TAG: ${{ github.event.release.tag_name || inputs.tag || github.ref_name }}
     timeout-minutes: 60
 
     steps:
+      # The tag, or for a draft whose tag does not exist yet, its target.
+      - name: Ref
+        id: ref
+        run: |
+          if gh api "repos/$GH_REPO/git/ref/tags/$TAG" --silent 2>/dev/null; then
+            echo "ref=refs/tags/$TAG" >> "$GITHUB_OUTPUT"
+          else
+            target=$(gh release view "$TAG" --json targetCommitish --jq .targetCommitish)
+            echo "No tag $TAG yet; building the release's target $target"
+            echo "ref=$target" >> "$GITHUB_OUTPUT"
+          fi
+
       - uses: actions/checkout@v4
         with:
+          ref: ${{ steps.ref.outputs.ref }}
           submodules: true
 
       - name: Toolchain
@@ -25,7 +67,7 @@ jobs:
       # Universal, so the cask and the downloads run on Intel Macs too.
       # The tag, without its "v", becomes the app's version.
       - name: Build
-        run: VERSION="${GITHUB_REF_NAME#v}" ARCHS="arm64 x86_64" scripts/build-app.sh
+        run: VERSION="${TAG#v}" ARCHS="arm64 x86_64" scripts/build-app.sh
 
       - name: Checks
         run: |
@@ -38,8 +80,6 @@ jobs:
 
       # ditto, not zip, keeps the signature and extended attributes intact.
       - name: Publish
-        env:
-          GH_TOKEN: ${{ github.token }}
         run: |
           ditto -c -k --keepParent build/smol-pdf.app smol-pdf.zip
           mkdir "$RUNNER_TEMP/smolpdf-cli"
@@ -47,4 +87,8 @@ jobs:
           cp -R build/smol-pdf.app/Contents/Resources/Licenses "$RUNNER_TEMP/smolpdf-cli/"
           tar -czf smolpdf-cli.tar.gz -C "$RUNNER_TEMP" smolpdf-cli
           shasum -a 256 smol-pdf.zip smolpdf-cli.tar.gz | tee SHA256SUMS.txt
-          gh release create "$GITHUB_REF_NAME" smol-pdf.zip smolpdf-cli.tar.gz SHA256SUMS.txt --generate-notes
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" smol-pdf.zip smolpdf-cli.tar.gz SHA256SUMS.txt --clobber
+          else
+            gh release create "$TAG" smol-pdf.zip smolpdf-cli.tar.gz SHA256SUMS.txt --generate-notes
+          fi
